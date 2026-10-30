@@ -16,7 +16,7 @@ It runs on **Cloudflare Workers**, and the sandbox runs on **E2B** or **Impello*
 
 | Thing | Cost | Notes |
 |---|---|---|
-| Cloudflare account on **Workers Paid** | $5/month | The free plan's CPU limit is too small for the sandbox calls. |
+| Cloudflare account on **Workers Paid** | $5/month | The free plan's CPU limit is too small for the sandbox calls. Setup also makes a D1 database and an R2 bucket (both have a free allowance). |
 | A sandbox provider: **E2B** or **Impello** | E2B: $100 free credit. Impello: 7-day free trial. | Setup asks which one. |
 | Claude: a **Pro/Max plan** or an **Anthropic API key** | Your plan, or pay per use | Read [Which Claude sign-in?](#which-claude-sign-in) first. |
 | A Slack workspace where you can install apps | Free | |
@@ -108,6 +108,10 @@ can only read and write code and pull requests.
 - **Nothing waits for Claude.** The Worker starts Claude in the sandbox and returns. When Claude is
   done, the sandbox posts its answer back to `/sandbox/callback`. A turn can take as long as it needs
   (up to the limit), far longer than any Worker request.
+- **Every turn is backed up.** After each turn the sandbox copies the thread's Claude transcript to
+  an R2 bucket through `/sandbox/transcript`, using its one-turn token. The Worker picks the object
+  key from the token (`transcripts/<channel>/<thread>/<turn>.jsonl.gz`), so a sandbox can only write
+  its own thread's backups. Backups are kept forever; a D1 table indexes them.
 - **The Slack token never enters the sandbox.** The sandbox gets a token that can post one turn's answer
   into one thread, and it expires. Claude reads text anyone can write, so the sandbox holds as little
   as possible.
@@ -120,9 +124,27 @@ can only read and write code and pull requests.
 | `src/turn.ts` | Starts one turn: prompt, tokens, launch |
 | `src/sandbox.ts` | E2B / Impello: find, create, pause, launch |
 | `src/github.ts` | GitHub App tokens |
+| `src/models.ts` | The `!model` aliases and their model ids, in one place |
+| `src/transcripts.ts` | The transcript backup rules: the R2 key, the size limit |
+| `src/db.ts` | The D1 database helpers |
+| `migrations/` | The D1 tables. `npm run setup` applies them |
 | `box/run-turn.mjs` | Runs inside the sandbox: runs Claude, posts the answer back |
 | `box/CLAUDE.md` | The instructions Claude reads in the sandbox. Edit this to change the bot's behavior. |
 | `template/Dockerfile` | The sandbox image. Run `npm run template:build` after you change it. |
+
+## Pick the model
+
+Each thread runs on **Opus** unless you say otherwise. Send `!model sonnet` (or `opus`, `haiku`) in
+the thread, on its own, to switch; `!model` alone shows the current one. A turn that is already
+running keeps its model, and the switch applies from the next turn. The aliases and the model ids
+they map to live in `src/models.ts`.
+
+## Transcript backups
+
+Every turn's transcript is copied to the R2 bucket `slack-agent-transcripts` and **never deleted**:
+the bucket has no lifecycle rule. Transcripts are small (gzipped text) and R2 storage is cheap, but
+it grows with every turn. To keep less, add a lifecycle rule to the bucket in the Cloudflare
+dashboard (R2 > the bucket > Settings > Object lifecycle rules).
 
 ## Settings
 

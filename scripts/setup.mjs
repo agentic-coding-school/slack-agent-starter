@@ -16,6 +16,9 @@ import { createInterface } from 'node:readline/promises'
 
 const WRANGLER = ['npx', '--yes', 'wrangler']
 const QUEUE = 'slack-agent-turns'
+// Must match wrangler.jsonc.
+const BUCKET = 'slack-agent-transcripts'
+const DATABASE = 'slack-agent'
 const fileArg = process.argv.indexOf('--file')
 const FILE = fileArg !== -1 ? process.argv[fileArg + 1] : null
 const SKIP_TEMPLATE = process.argv.includes('--skip-template')
@@ -49,6 +52,22 @@ function setVar(name, value) {
   const path = 'wrangler.jsonc'
   const text = readFileSync(path, 'utf8')
   writeFileSync(path, text.replace(new RegExp(`("${name}":\\s*)"[^"]*"`), `$1"${value}"`))
+}
+
+function findDatabaseId(name) {
+  const r = wrangler(['d1', 'list', '--json'], { capture: true })
+  try {
+    const list = JSON.parse(r.out.slice(r.out.indexOf('[')))
+    return list.find((d) => d.name === name)?.uuid ?? null
+  } catch {
+    return null
+  }
+}
+
+function setDatabaseId(id) {
+  const path = 'wrangler.jsonc'
+  const text = readFileSync(path, 'utf8')
+  writeFileSync(path, text.replace(/("database_id":\s*)"[^"]*"/, `$1"${id}"`))
 }
 
 /** Reads KEY=value lines. Values may be quoted. Empty values count as missing. */
@@ -117,13 +136,44 @@ if (SKIP_TEMPLATE) {
   }
 }
 
-step('Queue and Worker')
+step('Queue, bucket, database and Worker')
 const queue = wrangler(['queues', 'create', QUEUE], { capture: true })
 if (!queue.ok && !/already exists|already taken|11009/i.test(queue.out)) {
   console.error(queue.out)
   console.error('NEXT: could not create the queue. Check that Workers Paid is on for this Cloudflare account.')
   process.exit(1)
 }
+
+// The transcript backups. No lifecycle rule: they are kept forever (see the README on cost).
+const bucket = wrangler(['r2', 'bucket', 'create', BUCKET], { capture: true })
+if (!bucket.ok && !/already exists|already own|10004/i.test(bucket.out)) {
+  console.error(bucket.out)
+  console.error('NEXT: could not create the R2 bucket. Open R2 once in the Cloudflare dashboard to turn it on, then run again.')
+  process.exit(1)
+}
+console.log(`  R2 bucket ${BUCKET} ready`)
+
+const db = wrangler(['d1', 'create', DATABASE], { capture: true })
+if (!db.ok && !/already exists|7502/i.test(db.out)) {
+  console.error(db.out)
+  console.error('NEXT: could not create the D1 database. Fix the error above, then run again.')
+  process.exit(1)
+}
+const databaseId = findDatabaseId(DATABASE)
+if (!databaseId) {
+  console.error(`NEXT: created the D1 database, but \`wrangler d1 list\` does not show ${DATABASE}. Run setup again.`)
+  process.exit(1)
+}
+setDatabaseId(databaseId)
+// CI=1 answers wrangler's "Ok to proceed?" for us. Applied migrations are skipped, so this repeats safely.
+const migrate = wrangler(['d1', 'migrations', 'apply', DATABASE, '--remote'], { capture: true, env: { ...process.env, CI: '1' } })
+if (!migrate.ok) {
+  console.error(migrate.out)
+  console.error('NEXT: the database migrations failed. Fix the error above, then run again.')
+  process.exit(1)
+}
+console.log(`  D1 database ${DATABASE} ready, migrations applied`)
+
 const deploy = wrangler(['deploy'], { capture: true })
 if (!deploy.ok) {
   console.error(deploy.out)

@@ -23,6 +23,16 @@
     "consumers": [{ "queue": "slack-agent-turns", "max_batch_size": 1, "max_retries": 3 }]
   },
 
+  // Routines, channel settings and the transcript index. `npm run setup` creates the database,
+  // writes its id here, and applies the SQL files in migrations/.
+  "d1_databases": [
+    { "binding": "DB", "database_name": "slack-agent", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
+  ],
+
+  // Every turn's Claude transcript, copied out of the sandbox after the turn. Kept forever: the
+  // bucket has no lifecycle rule. `npm run setup` creates it.
+  "r2_buckets": [{ "binding": "TRANSCRIPTS", "bucket_name": "slack-agent-transcripts" }],
+
   // The script the sandbox runs for each turn, and the instructions Claude reads there.
   "rules": [{ "type": "Text", "globs": ["**/box/*.md", "**/box/*.mjs"], "fallthrough": true }],
 

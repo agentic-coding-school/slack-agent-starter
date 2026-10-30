@@ -6,6 +6,7 @@ import {
   abortStart,
   accept,
   afterPause,
+  applyModelCommand,
   emptyThread,
   finish,
   LOST_TURN_MARGIN_MS,
@@ -13,10 +14,12 @@ import {
   requeue,
   type AcceptResult,
   type FinishResult,
+  type ModelCommandResult,
   type SlackMessage,
   type ThreadData,
   type Turn,
 } from './thread.ts'
+import type { ModelCommand } from './models.ts'
 import { enqueueTurn } from './turn.ts'
 
 /** How soon the alarm retries a turn whose job could not be queued. */
@@ -40,6 +43,14 @@ export class ThreadState extends DurableObject<Env> {
     const result = accept(data, msg, { mention, ...this.clock() })
     if (result.action !== 'skip') await this.save(data)
     if (result.action === 'start') await this.armAlarm(data)
+    return result
+  }
+
+  /** A `!model` message. Never starts a turn; the caller posts the reply. */
+  async modelCommand(channel: string, threadTs: string, origin: string, msg: SlackMessage, command: ModelCommand, mention: boolean): Promise<ModelCommandResult> {
+    const data = await this.load(channel, threadTs, origin)
+    const result = applyModelCommand(data, msg, command, { mention, now: Date.now() })
+    if (result.action !== 'skip') await this.save(data)
     return result
   }
 

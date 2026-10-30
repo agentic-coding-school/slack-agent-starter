@@ -1,7 +1,7 @@
 // I-3: one turn at a time per thread; each Slack message runs once; a thread starts with a mention.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { abortStart, accept, afterPause, emptyThread, finish, LOST_TURN_MARGIN_MS, onAlarm, requeue, type ThreadData } from '../src/thread.ts'
+import { abortStart, accept, afterPause, applyModelCommand, emptyThread, finish, LOST_TURN_MARGIN_MS, onAlarm, requeue, type ThreadData } from '../src/thread.ts'
 
 function ids() {
   let n = 0
@@ -159,4 +159,73 @@ test('a turn records when it started, for the deadline', () => {
   const data = fresh()
   const r = accept(data, msg('100.0'), { mention: true, now: 1234, newTurnId: ids() })
   if (r.action === 'start') assert.equal(r.turn.startedAt, 1234)
+})
+
+test('a new turn runs on the default model, and `!model` changes it from the next turn on', () => {
+  const data = fresh()
+  const newTurnId = ids()
+  const first = accept(data, msg('100.0'), { mention: true, now: 1, newTurnId })
+  if (first.action !== 'start') throw new Error('expected a start')
+  assert.equal(first.turn.model, 'opus')
+
+  const set = applyModelCommand(data, msg('100.5', '!model haiku'), { kind: 'set', alias: 'haiku' }, { mention: false, now: 2 })
+  assert.equal(set.action, 'reply')
+  if (set.action === 'reply') assert.match(set.text, /next turn/)
+  assert.equal(data.running?.turnId, 'turn-1')
+  assert.deepEqual(data.pending, [])
+
+  const done = finish(data, 'turn-1', { now: 3, newTurnId })
+  assert.equal(done.accepted && done.next, null)
+  const second = accept(data, msg('101.0'), { mention: false, now: 4, newTurnId })
+  if (second.action !== 'start') throw new Error('expected a start')
+  assert.equal(second.turn.model, 'haiku')
+})
+
+test('a `!model` message is deduped and needs a mention in a thread that is not ours', () => {
+  const data = fresh()
+  const cmd = { kind: 'set', alias: 'sonnet' } as const
+  assert.deepEqual(applyModelCommand(data, msg('100.0', '!model sonnet'), cmd, { mention: false, now: 1 }), {
+    action: 'skip',
+    reason: 'not-our-thread',
+  })
+  assert.equal(data.model, undefined)
+  assert.equal(applyModelCommand(data, msg('100.0', '!model sonnet'), cmd, { mention: true, now: 1 }).action, 'reply')
+  assert.deepEqual(applyModelCommand(data, msg('100.0', '!model sonnet'), cmd, { mention: true, now: 1 }), {
+    action: 'skip',
+    reason: 'duplicate',
+  })
+  assert.equal(data.model, 'sonnet')
+})
+
+test('`!model` at the top of a thread makes it ours, and the first real turn still reads the history', () => {
+  const data = fresh()
+  const newTurnId = ids()
+  applyModelCommand(data, msg('100.0', '!model sonnet'), { kind: 'set', alias: 'sonnet' }, { mention: true, now: 1 })
+  assert.equal(data.running, null)
+
+  const r = accept(data, msg('100.5'), { mention: false, now: 2, newTurnId })
+  if (r.action !== 'start') throw new Error('expected a start')
+  assert.equal(r.turn.firstTurn, true)
+  assert.equal(r.turn.model, 'sonnet')
+
+  // If that start is undone, the thread stays ours and the retry is still the first turn.
+  abortStart(data, r.turn)
+  assert.equal(data.known, true)
+  const retry = accept(data, msg('100.5'), { mention: false, now: 3, newTurnId })
+  if (retry.action !== 'start') throw new Error('expected a start')
+  assert.equal(retry.turn.firstTurn, true)
+
+  finish(data, retry.turn.turnId, { now: 4, newTurnId })
+  const later = accept(data, msg('101.0'), { mention: false, now: 5, newTurnId })
+  if (later.action !== 'start') throw new Error('expected a start')
+  assert.equal(later.turn.firstTurn, false)
+})
+
+test('`!model` with no name or an unknown name changes nothing', () => {
+  const data = fresh()
+  const show = applyModelCommand(data, msg('100.0', '!model'), { kind: 'show' }, { mention: true, now: 1 })
+  assert.equal(show.action === 'reply' && /opus/.test(show.text), true)
+  const unknown = applyModelCommand(data, msg('100.1', '!model gpt'), { kind: 'unknown', given: 'gpt' }, { mention: true, now: 1 })
+  assert.equal(unknown.action === 'reply' && /sonnet/.test(unknown.text), true)
+  assert.equal(data.model, undefined)
 })

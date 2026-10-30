@@ -15,7 +15,8 @@ a secret.
 - Run `npx wrangler whoami`. If it says the human is not logged in, ask them to run
   `npx wrangler login` themselves (it opens a browser). Wait for them to say it is done.
 - Tell the human: their Cloudflare account must be on **Workers Paid** ($5/month):
-  dash.cloudflare.com > Workers & Pages > Plans. The free plan does not work.
+  dash.cloudflare.com > Workers & Pages > Plans. The free plan does not work. R2 must be turned on
+  too: dash.cloudflare.com > R2 > Purchase / Get started (it has a free allowance).
 
 ## 2. Ask two questions
 
@@ -45,7 +46,8 @@ Ask each one on its own, with these options, and wait for the answer.
 npm run setup -- --file .env.setup
 ```
 
-It builds the sandbox image (a few minutes the first time), deploys the Worker, stores the secrets,
+It builds the sandbox image (a few minutes the first time), creates the queue, the R2 bucket for
+transcript backups and the D1 database (and applies `migrations/`), deploys the Worker, stores the secrets,
 and writes `slack-manifest.local.json` with the Worker URL in it. It ends with `NEXT:` lines. Read
 them and do what they say. If a step fails, the `NEXT:` line says why; fix that and run it again.
 Running it again is always safe.

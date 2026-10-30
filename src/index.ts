@@ -1,7 +1,10 @@
 import { verifyCallbackToken } from './callback-token.ts'
+import { recordTranscript } from './db.ts'
 import type { Env } from './env.ts'
+import { parseModelCommand } from './models.ts'
 import { postInThread, react, verifySlackSignature } from './slack.ts'
 import { threadStub } from './thread-state.ts'
+import { checkTranscriptSize, transcriptKey } from './transcripts.ts'
 import { DONE_EMOJI, FAILED_EMOJI, QUEUED_EMOJI, runTurnJob, WORKING_EMOJI, type TurnJob } from './turn.ts'
 
 export { ThreadState } from './thread-state.ts'
@@ -11,6 +14,7 @@ export { ThreadState } from './thread-state.ts'
  *
  *   POST /slack/events      Slack's Events API. Answers within Slack's 3 seconds and queues the work.
  *   POST /sandbox/callback  A sandbox delivering one turn's answer, with its one-turn token.
+ *   POST /sandbox/transcript  A sandbox backing up its Claude transcript to R2, same token.
  *   queue                   Starts a turn in a sandbox (src/turn.ts).
  *
  * Plus the thread's alarm (src/thread-state.ts), which pauses quiet sandboxes.
@@ -20,6 +24,7 @@ export default {
     const url = new URL(request.url)
     if (request.method === 'POST' && url.pathname === '/slack/events') return slackEvents(request, env, ctx)
     if (request.method === 'POST' && url.pathname === '/sandbox/callback') return sandboxCallback(request, env)
+    if (request.method === 'POST' && url.pathname === '/sandbox/transcript') return sandboxTranscript(request, env)
     if (url.pathname === '/') return new Response('slack-agent is running. Point Slack at /slack/events.\n')
     return new Response('not found', { status: 404 })
   },
@@ -88,6 +93,16 @@ async function slackEvents(request: Request, env: Env, ctx: ExecutionContext) {
   const msg = { ts: event.ts, user: event.user, text: stripMention(event.text ?? '', botUserId) }
 
   const thread = threadStub(env, event.channel, threadTs)
+
+  const command = parseModelCommand(msg.text)
+  if (command) {
+    const reply = await thread.modelCommand(event.channel, threadTs, origin, msg, command, mention)
+    if (reply.action === 'reply') {
+      ctx.waitUntil(postInThread(env, event.channel, threadTs, reply.text).catch((err) => console.error('could not post the model reply:', err)))
+    }
+    return new Response('ok')
+  }
+
   const result = await thread.accept(event.channel, threadTs, origin, msg, mention)
   if (result.action === 'start') {
     try {
@@ -137,6 +152,40 @@ async function sandboxCallback(request: Request, env: Env) {
   await react(env, channel, lastTs, body.ok ? DONE_EMOJI : FAILED_EMOJI, WORKING_EMOJI)
   console.log(`turn ${turnId} delivered ok=${body.ok} cost=${body.costUsd ?? '?'}`)
   return Response.json({ ok: true })
+}
+
+/**
+ * Stores one turn's transcript in R2. The body is the gzipped JSONL; the key comes from the
+ * token's claims only (src/transcripts.ts), so a sandbox can write its own thread's backups and
+ * nothing else. Each turn writes its own object, and nothing here can delete one.
+ */
+async function sandboxTranscript(request: Request, env: Env) {
+  const turnId = request.headers.get('x-turn-id') ?? ''
+  const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
+  const verified = await verifyCallbackToken(env.CALLBACK_SECRET, token, turnId)
+  if (!verified.ok) return Response.json({ ok: false, error: verified.reason }, { status: 401 })
+
+  const refused = checkTranscriptSize(request.headers.get('content-length'))
+  if (refused) return Response.json({ ok: false, error: refused.error }, { status: refused.status })
+
+  const { claims } = verified
+  const key = transcriptKey(claims)
+  const body = await request.arrayBuffer()
+  await env.TRANSCRIPTS.put(key, body, {
+    httpMetadata: { contentType: 'application/x-ndjson', contentEncoding: 'gzip' },
+    customMetadata: { channel: claims.channel, threadTs: claims.threadTs, turnId: claims.turnId },
+  })
+  // The bytes are safe in R2 now. A failed index row costs the page a listing, not the backup.
+  await recordTranscript(env, {
+    key,
+    channel: claims.channel,
+    thread_ts: claims.threadTs,
+    turn_id: claims.turnId,
+    bytes: body.byteLength,
+    created_at: Date.now(),
+  }).catch((err) => console.error(`turn ${claims.turnId}: could not index the transcript:`, err))
+  console.log(`turn ${claims.turnId} transcript stored ${key} (${body.byteLength} bytes)`)
+  return Response.json({ ok: true, key })
 }
 
 function stripMention(text: string, botUserId?: string) {

@@ -2,7 +2,7 @@
  * The rules for one Slack thread, as plain functions over plain data so they can be tested
  * without Cloudflare. src/thread-state.ts stores the data and calls these.
  *
- * Four rules hold here:
+ * Five rules hold here:
  *
  * 1. ONE TURN AT A TIME. Two `claude --resume` runs on one session write into the same transcript
  *    and break it for good. A message that arrives while a turn runs waits in `pending`, and the
@@ -13,7 +13,11 @@
  *    without a mention.
  * 4. NO TURN STARTS WHILE THE SANDBOX IS BEING PAUSED. A pause request that lands after a turn
  *    started would freeze that turn mid-run, so messages wait until the pause is done.
+ * 5. A MODEL PICK IS NOT A TURN. `!model sonnet` sets the thread's model and gets a short reply;
+ *    it never starts Claude. A running turn keeps its model; the pick applies from the next turn.
  */
+
+import { describeModel, modelChoices, resolveModel, type ModelAlias, type ModelCommand } from './models.ts'
 
 export interface SlackMessage {
   ts: string
@@ -28,6 +32,8 @@ export interface Turn {
   firstTurn: boolean
   /** When the thread started this turn. The turn's time limit counts from here, everywhere. */
   startedAt: number
+  /** The model this turn runs on, fixed when the turn starts (rule 5). */
+  model: ModelAlias
 }
 
 export interface ThreadData {
@@ -44,6 +50,13 @@ export interface ThreadData {
   parked: boolean
   /** Set while a pause call is in flight (rule 4). */
   pausing: boolean
+  /** The thread's `!model` pick. Unset means the default. */
+  model?: ModelAlias
+  /**
+   * Set when a `!model` message made the thread ours before any turn ran, so the first real turn
+   * still reads the earlier messages. Cleared once a turn finishes.
+   */
+  historyUnread?: boolean
 }
 
 /** How many message ids to remember for dedupe. Slack retries within minutes, not days. */
@@ -78,10 +91,9 @@ export function accept(data: ThreadData, msg: SlackMessage, opts: Clock & { ment
   if (!data.known && !opts.mention) return { action: 'skip', reason: 'not-our-thread' }
   if (data.seen.includes(msg.ts)) return { action: 'skip', reason: 'duplicate' }
 
-  data.seen.push(msg.ts)
-  if (data.seen.length > SEEN_LIMIT) data.seen.splice(0, data.seen.length - SEEN_LIMIT)
+  remember(data, msg.ts)
   data.lastActivityAt = opts.now
-  const firstTurn = !data.known
+  const firstTurn = !data.known || data.historyUnread === true
   data.known = true
 
   if (data.running || data.pausing) {
@@ -89,6 +101,39 @@ export function accept(data: ThreadData, msg: SlackMessage, opts: Clock & { ment
     return { action: 'queued' }
   }
   return { action: 'start', turn: begin(data, [msg], firstTurn, opts) }
+}
+
+export type ModelCommandResult = { action: 'skip'; reason: string } | { action: 'reply'; text: string }
+
+/**
+ * A `!model` message (rule 5). It follows rules 2 and 3 like any message: deduped, and only in a
+ * thread that is ours or starts with a mention. It marks the thread as ours, so later replies reach
+ * the bot, but it does not use up the first turn: that one still reads the earlier messages.
+ */
+export function applyModelCommand(
+  data: ThreadData,
+  msg: SlackMessage,
+  command: ModelCommand,
+  opts: { now: number; mention: boolean },
+): ModelCommandResult {
+  if (!data.known && !opts.mention) return { action: 'skip', reason: 'not-our-thread' }
+  if (data.seen.includes(msg.ts)) return { action: 'skip', reason: 'duplicate' }
+  remember(data, msg.ts)
+  data.lastActivityAt = opts.now
+  if (!data.known) {
+    data.known = true
+    data.historyUnread = true
+  }
+
+  if (command.kind === 'unknown') {
+    return { action: 'reply', text: `I don't know the model \`${command.given.replaceAll('`', '')}\`. Pick one of ${modelChoices()}.` }
+  }
+  if (command.kind === 'show') {
+    return { action: 'reply', text: `This thread uses ${describeModel(resolveModel(data.model))}. Change it with \`!model <name>\` (${modelChoices()}).` }
+  }
+  data.model = command.alias
+  const when = data.running ? ' from the next turn (the one running now keeps its model)' : ''
+  return { action: 'reply', text: `This thread now uses ${describeModel(command.alias)}${when}.` }
 }
 
 /**
@@ -100,7 +145,8 @@ export function abortStart(data: ThreadData, turn: Turn) {
   data.running = null
   const ids = new Set(turn.messages.map((m) => m.ts))
   data.seen = data.seen.filter((ts) => !ids.has(ts))
-  if (turn.firstTurn) data.known = false
+  // A thread a `!model` message made ours stays ours; its first turn is still to come.
+  if (turn.firstTurn && !data.historyUnread) data.known = false
 }
 
 /**
@@ -118,6 +164,7 @@ export type FinishResult = { accepted: false } | { accepted: true; next: Turn | 
 export function finish(data: ThreadData, turnId: string, opts: Clock): FinishResult {
   if (data.running?.turnId !== turnId) return { accepted: false }
   data.running = null
+  data.historyUnread = undefined
   data.lastActivityAt = opts.now
   return { accepted: true, next: takePending(data, opts) }
 }
@@ -163,6 +210,11 @@ export function afterPause(data: ThreadData, opts: Clock & { paused: boolean }):
   return takePending(data, opts)
 }
 
+function remember(data: ThreadData, ts: string) {
+  data.seen.push(ts)
+  if (data.seen.length > SEEN_LIMIT) data.seen.splice(0, data.seen.length - SEEN_LIMIT)
+}
+
 function takePending(data: ThreadData, opts: Clock): Turn | null {
   if (!data.pending.length) return null
   const messages = data.pending.splice(0)
@@ -173,5 +225,5 @@ function begin(data: ThreadData, messages: SlackMessage[], firstTurn: boolean, o
   const turnId = opts.newTurnId()
   data.running = { turnId, startedAt: opts.now }
   data.parked = false
-  return { turnId, messages, firstTurn, startedAt: opts.now }
+  return { turnId, messages, firstTurn, startedAt: opts.now, model: resolveModel(data.model) }
 }

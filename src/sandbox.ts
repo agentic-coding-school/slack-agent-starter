@@ -101,6 +101,10 @@ export interface Launch {
   prompt: string
   callbackUrl: string
   callbackToken: string
+  /** Where run-turn.mjs uploads the transcript after the turn, with the same token. */
+  transcriptUrl: string
+  /** The Claude model id for `claude --model`. */
+  model: string
   claudeEnvs: Record<string, string>
   githubToken: string | null
   /** When the turn must end, in ms since the epoch. */
@@ -151,6 +155,8 @@ export async function launchTurn(env: Env, launch: Launch) {
       PROMPT_FILE: promptPath,
       CALLBACK_URL: launch.callbackUrl,
       CALLBACK_TOKEN: launch.callbackToken,
+      TRANSCRIPT_URL: launch.transcriptUrl,
+      CLAUDE_MODEL: launch.model,
       TURN_DEADLINE: String(launch.deadline),
       SLACK_CHANNEL: launch.channel,
       SLACK_THREAD_TS: launch.threadTs,

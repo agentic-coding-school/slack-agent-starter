@@ -2,6 +2,7 @@ import { signCallbackToken } from './callback-token.ts'
 import { claudeAuth, maxTurnMs, type Env } from './env.ts'
 import { githubConfigured, mintInstallationToken } from './github.ts'
 import { buildPrompt, sessionIdFor } from './prompt.ts'
+import { modelId } from './models.ts'
 import { launchTurn } from './sandbox.ts'
 import { postInThread, react, threadHistory } from './slack.ts'
 import { threadStub } from './thread-state.ts'
@@ -75,6 +76,9 @@ export async function runTurnJob(env: Env, job: TurnJob, attempt: number, maxAtt
       prompt,
       callbackUrl: new URL('/sandbox/callback', job.origin).toString(),
       callbackToken,
+      transcriptUrl: new URL('/sandbox/transcript', job.origin).toString(),
+      // A job queued before models existed has no model; modelId falls back to the default.
+      model: modelId(turn.model),
       claudeEnvs: auth.envs,
       githubToken,
       deadline,

@@ -8,6 +8,10 @@ import type { TurnJob } from './turn.ts'
 export interface Env {
   THREADS: DurableObjectNamespace<ThreadState>
   TURNS: Queue<TurnJob>
+  /** Routines, channel settings and the transcript index. Tables: migrations/. */
+  DB: D1Database
+  /** Every turn's Claude transcript, kept forever (src/transcripts.ts). */
+  TRANSCRIPTS: R2Bucket
 
   // Slack app (Basic Information and OAuth & Permissions pages)
   SLACK_SIGNING_SECRET: string
