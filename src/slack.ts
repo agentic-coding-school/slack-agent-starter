@@ -33,7 +33,14 @@ export async function verifySlackSignature(
 }
 
 /** Slack's read methods take only form-encoded arguments; a JSON body reaches them empty. */
-const FORM_METHODS = new Set(['conversations.replies', 'conversations.history', 'users.info'])
+const FORM_METHODS = new Set([
+  'conversations.replies',
+  'conversations.history',
+  'users.info',
+  'files.info',
+  'files.getUploadURLExternal',
+  'files.completeUploadExternal',
+])
 
 export async function slackApi(env: Env, method: string, args: Record<string, unknown>) {
   const form = FORM_METHODS.has(method)
@@ -112,4 +119,49 @@ export async function deleteMessage(env: Env, channel: string, ts: string) {
   await slackApi(env, 'chat.delete', { channel, ts }).catch((err) => {
     if (!String(err?.message).includes('message_not_found')) console.warn(`could not delete ${ts}:`, err?.message ?? err)
   })
+}
+
+/** A file's full object (files.info), or null when Slack will not say. */
+export async function fileInfo(env: Env, fileId: string): Promise<Record<string, unknown> | null> {
+  const json = await slackApi(env, 'files.info', { file: fileId })
+  return (json.file as Record<string, unknown>) ?? null
+}
+
+/**
+ * Posts a file into a thread, with Slack's three-step upload: ask for an upload URL, send the bytes
+ * there (that step carries no token), then share the file into the thread. Returns its permalink.
+ */
+export async function uploadToThread(
+  env: Env,
+  args: { channel: string; threadTs: string; filename: string; title?: string; comment?: string; bytes: ArrayBuffer },
+): Promise<string | null> {
+  const start = await slackApi(env, 'files.getUploadURLExternal', { filename: args.filename, length: args.bytes.byteLength })
+  const uploadUrl = start.upload_url as string
+  const fileId = start.file_id as string
+  const sent = await fetch(uploadUrl, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: args.bytes })
+  if (!sent.ok) throw new Error(`slack upload: ${sent.status}`)
+  const done = await slackApi(env, 'files.completeUploadExternal', {
+    files: JSON.stringify([{ id: fileId, ...(args.title ? { title: args.title } : {}) }]),
+    channel_id: args.channel,
+    thread_ts: args.threadTs,
+    ...(args.comment ? { initial_comment: toMrkdwn(args.comment) } : {}),
+  })
+  const files = done.files as Array<{ permalink?: string }> | undefined
+  return files?.[0]?.permalink ?? null
+}
+
+/**
+ * Makes a canvas from Markdown, lets the channel's members edit it, and returns its id and link.
+ * The link line in the thread is the caller's to post. A failed share leaves a canvas only the bot
+ * can see, so it throws rather than post a link nobody can open.
+ */
+export async function createCanvas(env: Env, args: { channel: string; title: string; markdown: string }) {
+  const made = await slackApi(env, 'canvases.create', {
+    title: args.title,
+    document_content: { type: 'markdown', markdown: args.markdown },
+  })
+  const canvasId = made.canvas_id as string
+  await slackApi(env, 'canvases.access.set', { canvas_id: canvasId, access_level: 'write', channel_ids: [args.channel] })
+  const info = await fileInfo(env, canvasId).catch(() => null)
+  return { canvasId, permalink: (info?.permalink as string | undefined) ?? null }
 }

@@ -28,6 +28,7 @@
  *    race can cost a second answer; it can never cost a message.
  */
 
+import type { SlackFileRef } from './files.ts'
 import { describeModel, modelChoices, resolveModel, type ModelAlias, type ModelCommand } from './models.ts'
 
 export interface SlackMessage {
@@ -36,6 +37,8 @@ export interface SlackMessage {
   text: string
   /** The message carries files. It always waits for a turn of its own (rule 7). */
   hasFiles?: boolean
+  /** The files, for the turn to download (src/files.ts). */
+  files?: SlackFileRef[]
 }
 
 export interface Turn {

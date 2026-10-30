@@ -18,10 +18,56 @@ export interface CallbackClaims {
   exp: number
 }
 
-export async function signCallbackToken(secret: string, claims: CallbackClaims): Promise<string> {
+/**
+ * What a token is for. Each purpose signs with its own key, so a token minted for one door can
+ * never open another.
+ *
+ *   reply  The runner's token: the answer, the progress reports and the transcript backup. Claude
+ *          never sees it (box/run-turn.mjs strips it), so Claude cannot end its own turn.
+ *   tools  Claude's token, for the doors it calls itself (box/tools.mjs): post a file or a canvas
+ *          into this thread. Same claims, same expiry, and only ever this one thread.
+ *   file   A grant to download ONE Slack file this thread was sent (src/files.ts).
+ */
+export type TokenPurpose = 'reply' | 'tools' | 'file'
+
+export async function signCallbackToken(secret: string, claims: CallbackClaims, purpose: TokenPurpose = 'reply'): Promise<string> {
+  return signClaims(secret, purpose, claims)
+}
+
+/** Signs any claims object for one purpose. */
+export async function signClaims(secret: string, purpose: TokenPurpose, claims: object): Promise<string> {
   const body = b64url(new TextEncoder().encode(JSON.stringify(claims)))
-  const sig = await hmac(secret, body)
+  const sig = await hmac(keyFor(secret, purpose), body)
   return `${body}.${b64url(sig)}`
+}
+
+/** The claims of a token signed for `purpose` that has not expired, or the reason it is refused. */
+export async function readClaims<T extends { exp: number }>(
+  secret: string,
+  purpose: TokenPurpose,
+  token: string | null | undefined,
+  now = Date.now(),
+): Promise<{ ok: true; claims: T } | { ok: false; reason: string }> {
+  if (!token) return { ok: false, reason: 'missing token' }
+  const [body, sig] = token.split('.')
+  if (!body || !sig) return { ok: false, reason: 'malformed token' }
+
+  const expected = await hmac(keyFor(secret, purpose), body)
+  if (!timingSafeEqual(expected, fromB64url(sig))) return { ok: false, reason: 'bad signature' }
+
+  let claims: T
+  try {
+    claims = JSON.parse(new TextDecoder().decode(fromB64url(body)))
+  } catch {
+    return { ok: false, reason: 'malformed token' }
+  }
+  if (typeof claims?.exp !== 'number' || claims.exp <= now) return { ok: false, reason: 'expired' }
+  return { ok: true, claims }
+}
+
+/** The reply token keeps the bare secret, so tokens minted before purposes existed still verify. */
+function keyFor(secret: string, purpose: TokenPurpose) {
+  return purpose === 'reply' ? secret : `${purpose}:${secret}`
 }
 
 export type VerifyResult = { ok: true; claims: CallbackClaims } | { ok: false; reason: string }
@@ -32,23 +78,12 @@ export async function verifyCallbackToken(
   token: string | null | undefined,
   turnId: string,
   now = Date.now(),
+  purpose: TokenPurpose = 'reply',
 ): Promise<VerifyResult> {
-  if (!token) return { ok: false, reason: 'missing token' }
-  const [body, sig] = token.split('.')
-  if (!body || !sig) return { ok: false, reason: 'malformed token' }
-
-  const expected = await hmac(secret, body)
-  if (!timingSafeEqual(expected, fromB64url(sig))) return { ok: false, reason: 'bad signature' }
-
-  let claims: CallbackClaims
-  try {
-    claims = JSON.parse(new TextDecoder().decode(fromB64url(body)))
-  } catch {
-    return { ok: false, reason: 'malformed token' }
-  }
-  if (typeof claims.exp !== 'number' || claims.exp <= now) return { ok: false, reason: 'expired' }
-  if (claims.turnId !== turnId) return { ok: false, reason: 'token is for another turn' }
-  return { ok: true, claims }
+  const read = await readClaims<CallbackClaims>(secret, purpose, token, now)
+  if (!read.ok) return read
+  if (read.claims.turnId !== turnId) return { ok: false, reason: 'token is for another turn' }
+  return read
 }
 
 async function hmac(secret: string, data: string): Promise<Uint8Array> {

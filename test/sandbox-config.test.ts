@@ -22,7 +22,7 @@ test('the Slack bot token is never handed to a sandbox', () => {
 
 test('Claude in the sandbox never gets the reply token', () => {
   const runner = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'box', 'run-turn.mjs'), 'utf8')
-  assert.match(runner, /const { CALLBACK_TOKEN: _t, CALLBACK_URL: _u, TRANSCRIPT_URL: _x, PROGRESS_URL: _p, \.\.\.childEnv } = env/)
+  assert.match(runner, /const { CALLBACK_TOKEN: _t, CALLBACK_URL: _u, TRANSCRIPT_URL: _x, PROGRESS_URL: _p, FILES_MANIFEST: _m, FILE_URL: _f, \.\.\.childEnv } = env/)
   assert.match(runner, /env: { \.\.\.childEnv, AGENT_INBOX: INBOX },/)
 })
 
@@ -55,4 +55,14 @@ test('the sandbox gets the inbox helper and hook for mid-turn messages', () => {
   const runner = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'box', 'run-turn.mjs'), 'utf8')
   assert.match(runner, /from '\.\/inbox\.mjs'/)
   assert.match(runner, /'--settings', JSON\.stringify\(hookSettings\(/)
+})
+
+test('the sandbox gets the file helper and Claude gets its tools, with their own token', () => {
+  assert.match(source, /{ path: FILES_PATH, data: FILES }/)
+  assert.match(source, /{ path: TOOLS_PATH, data: TOOLS }/)
+  assert.match(source, /AGENT_TOOLS_TOKEN: launch\.toolsToken/)
+  const runner = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'box', 'run-turn.mjs'), 'utf8')
+  assert.match(runner, /from '\.\/files\.mjs'/)
+  // The download grants are read and deleted before Claude starts.
+  assert.ok(runner.indexOf('await fetchFiles(workDir)') < runner.indexOf("spawn('claude'"))
 })

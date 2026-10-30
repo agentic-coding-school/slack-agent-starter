@@ -21,15 +21,18 @@
 //   TURN_ID, SESSION_ID, PROMPT_FILE, CALLBACK_URL, CALLBACK_TOKEN, TRANSCRIPT_URL, PROGRESS_URL,
 //   TURN_DEADLINE,
 //   AGENT_INBOX (optional; where follow-ups wait, default a per-turn folder in /tmp)
+//   FILES_MANIFEST, FILE_URL (when the turn's messages carried files; see files.mjs)
+//   AGENT_API_URL, AGENT_TOOLS_TOKEN (Claude's own token for tools.mjs; passed through to Claude)
 //   CLAUDE_MODEL (the model id for --model)
 //   CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, and GH_TOKEN when GitHub is on.
 
 import { spawn } from 'node:child_process'
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { gzipSync } from 'node:zlib'
+import { downloadAll, filesNote } from './files.mjs'
 import { deliver, hookSettings, READ_ACTIVITY, takenTs } from './inbox.mjs'
 import { createProgress, onStreamEvent, shouldSendStatus, TICK_MS } from './progress.mjs'
 
@@ -109,8 +112,10 @@ async function runClaude() {
   // First turn creates the session, every later turn resumes it. The transcript file on disk is
   // the ground truth, so a paused-and-resumed sandbox picks up exactly where it left off.
   const sessionFlag = sessionExists(env.SESSION_ID) ? '--resume' : '--session-id'
-  mkdirSync(join(homedir(), 'work'), { recursive: true })
+  const workDir = join(homedir(), 'work')
+  mkdirSync(workDir, { recursive: true })
   mkdirSync(INBOX, { recursive: true })
+  await fetchFiles(workDir)
 
   const args = [
     '-p',
@@ -128,7 +133,7 @@ async function runClaude() {
   return await new Promise((resolve) => {
     // Claude and every command it runs get the env WITHOUT the reply token: a prompt-injected
     // Claude must not be able to post its own "answer" and end the turn.
-    const { CALLBACK_TOKEN: _t, CALLBACK_URL: _u, TRANSCRIPT_URL: _x, PROGRESS_URL: _p, ...childEnv } = env
+    const { CALLBACK_TOKEN: _t, CALLBACK_URL: _u, TRANSCRIPT_URL: _x, PROGRESS_URL: _p, FILES_MANIFEST: _m, FILE_URL: _f, ...childEnv } = env
     const child = spawn('claude', args, {
       cwd: join(homedir(), 'work'),
       env: { ...childEnv, AGENT_INBOX: INBOX },
@@ -238,6 +243,26 @@ async function runClaude() {
       resolve({ ok: false, error: detail.slice(0, 1500) })
     })
   })
+}
+
+/**
+ * Downloads the files the turn's messages carried (files.mjs), then adds where they are (or why one
+ * is missing) to the end of the prompt. The manifest goes as soon as it is read: its grants are for
+ * the runner, not for Claude.
+ */
+async function fetchFiles(workDir) {
+  if (!env.FILES_MANIFEST || !env.FILE_URL) return
+  let manifest = []
+  try {
+    manifest = JSON.parse(readFileSync(env.FILES_MANIFEST, 'utf8'))
+  } catch (err) {
+    console.error('could not read the files manifest:', err?.message ?? err)
+  } finally {
+    rmSync(env.FILES_MANIFEST, { force: true })
+  }
+  const results = await downloadAll({ manifest, url: env.FILE_URL, workDir })
+  const note = filesNote(results)
+  if (note) appendFileSync(env.PROMPT_FILE, `\n${note}\n`)
 }
 
 function sessionExists(id) {

@@ -5,6 +5,9 @@ import RUNNER from '../box/run-turn.mjs'
 import PROGRESS from '../box/progress.mjs'
 import INBOX from '../box/inbox.mjs'
 import INBOX_HOOK from '../box/inbox-hook.mjs'
+import FILES from '../box/files.mjs'
+import TOOLS from '../box/tools.mjs'
+import type { ManifestEntry } from './files.ts'
 import { idlePauseMs, maxTurnMs, type Env } from './env.ts'
 
 /**
@@ -42,6 +45,9 @@ const PROGRESS_PATH = `${AGENT_DIR}/progress.mjs`
 /** Mid-turn messages: the runner and the Claude Code hook it sets both import inbox.mjs. */
 const INBOX_PATH = `${AGENT_DIR}/inbox.mjs`
 const INBOX_HOOK_PATH = `${AGENT_DIR}/inbox-hook.mjs`
+/** Files from Slack: the runner imports files.mjs. Claude runs tools.mjs to post files and canvases. */
+const FILES_PATH = `${AGENT_DIR}/files.mjs`
+export const TOOLS_PATH = `${AGENT_DIR}/tools.mjs`
 const INSTRUCTIONS_PATH = `${HOME}/.claude/CLAUDE.md`
 
 /**
@@ -113,6 +119,12 @@ export interface Launch {
   transcriptUrl: string
   /** Where run-turn.mjs reports what Claude is doing, and learns whether to stop. Same token. */
   progressUrl: string
+  /** The Worker's address. Claude's tools (box/tools.mjs) call its /sandbox/* doors. */
+  origin: string
+  /** Claude's own token for those doors: post a file or a canvas into this thread. */
+  toolsToken: string
+  /** The files the turn's messages carried, each with its download grant (src/files.ts). */
+  files: ManifestEntry[]
   /** The Claude model id for `claude --model`. */
   model: string
   claudeEnvs: Record<string, string>
@@ -129,6 +141,8 @@ export interface Launch {
 export async function launchTurn(env: Env, launch: Launch) {
   const sandbox = await getOrCreateSandbox(env, launch.channel, launch.threadTs)
   const promptPath = `${AGENT_DIR}/prompt-${launch.turnId}.txt`
+  // The runner deletes it once the files are down: the grants in it are not Claude's business.
+  const manifestPath = `${AGENT_DIR}/files-${launch.turnId}.json`
 
   // Written on every turn, so a redeploy reaches threads that are already running.
   // The prompt is untrusted Slack text: it goes in a file, never on a command line.
@@ -137,8 +151,11 @@ export async function launchTurn(env: Env, launch: Launch) {
     { path: PROGRESS_PATH, data: PROGRESS },
     { path: INBOX_PATH, data: INBOX },
     { path: INBOX_HOOK_PATH, data: INBOX_HOOK },
+    { path: FILES_PATH, data: FILES },
+    { path: TOOLS_PATH, data: TOOLS },
     { path: INSTRUCTIONS_PATH, data: AGENT_INSTRUCTIONS },
     { path: promptPath, data: launch.prompt },
+    ...(launch.files.length ? [{ path: manifestPath, data: JSON.stringify(launch.files) }] : []),
   ])
 
   if (launch.githubToken) {
@@ -170,6 +187,10 @@ export async function launchTurn(env: Env, launch: Launch) {
       CALLBACK_TOKEN: launch.callbackToken,
       TRANSCRIPT_URL: launch.transcriptUrl,
       PROGRESS_URL: launch.progressUrl,
+      ...(launch.files.length ? { FILES_MANIFEST: manifestPath, FILE_URL: new URL('/sandbox/file', launch.origin).toString() } : {}),
+      // Claude keeps these two (the runner strips only the reply token); box/tools.mjs uses them.
+      AGENT_API_URL: launch.origin,
+      AGENT_TOOLS_TOKEN: launch.toolsToken,
       CLAUDE_MODEL: launch.model,
       TURN_DEADLINE: String(launch.deadline),
       SLACK_CHANNEL: launch.channel,

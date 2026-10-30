@@ -1,5 +1,6 @@
 import { signCallbackToken } from './callback-token.ts'
 import { claudeAuth, maxTurnMs, type Env } from './env.ts'
+import { manifestFor } from './files.ts'
 import { githubConfigured, mintInstallationToken } from './github.ts'
 import { buildPrompt, sessionIdFor } from './prompt.ts'
 import { modelId } from './models.ts'
@@ -68,13 +69,13 @@ export async function runTurnJob(env: Env, job: TurnJob, attempt: number, maxAtt
     // The time limit counts from when the thread started the turn, not from this launch, so a
     // launch delayed by queue retries cannot outlive the thread's lost-turn alarm.
     const deadline = turn.startedAt + maxTurnMs(env)
-    const callbackToken = await signCallbackToken(env.CALLBACK_SECRET, {
-      channel,
-      threadTs,
-      turnId: turn.turnId,
-      lastTs,
-      exp: deadline + TOKEN_GRACE_MS,
-    })
+    const claims = { channel, threadTs, turnId: turn.turnId, lastTs, exp: deadline + TOKEN_GRACE_MS }
+    const callbackToken = await signCallbackToken(env.CALLBACK_SECRET, claims)
+    // Claude's own token, for the doors it calls (box/tools.mjs). A different key from the reply
+    // token, so it cannot deliver an answer or stop the turn (src/callback-token.ts).
+    const toolsToken = await signCallbackToken(env.CALLBACK_SECRET, claims, 'tools')
+    // A grant per file the turn's messages carried; the runner swaps them for the bytes.
+    const files = await manifestFor(env.CALLBACK_SECRET, { channel, threadTs, exp: claims.exp, messages: turn.messages })
 
     await launchTurn(env, {
       channel,
@@ -86,6 +87,9 @@ export async function runTurnJob(env: Env, job: TurnJob, attempt: number, maxAtt
       callbackToken,
       transcriptUrl: new URL('/sandbox/transcript', job.origin).toString(),
       progressUrl: new URL('/sandbox/progress', job.origin).toString(),
+      origin: job.origin,
+      toolsToken,
+      files,
       // A job queued before models existed has no model; modelId falls back to the default.
       model: modelId(turn.model),
       claudeEnvs: auth.envs,

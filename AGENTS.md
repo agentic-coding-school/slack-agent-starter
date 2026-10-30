@@ -16,15 +16,17 @@ paste a secret into the chat; secrets go in `.env.setup`.
 - Model aliases (`!model opus|sonnet|haiku`) and their ids live only in `src/models.ts`.
 - D1 tables are made by numbered SQL files in `migrations/`; add a new file, never edit an applied
   one. `npm run setup` applies them. Query through `src/db.ts`, always with bound `?` values.
-- Every sandbox-to-Worker door (`/sandbox/callback`, `/sandbox/transcript`, `/sandbox/progress`)
-  checks the one-turn token and builds every key, channel and thread from the token's claims, never
-  from the request body. Text a sandbox sends for Slack is capped and escaped (`src/status.ts`).
+- Every sandbox-to-Worker door (`/sandbox/callback`, `/sandbox/transcript`, `/sandbox/progress`,
+  `/sandbox/upload`, `/sandbox/canvas`, `/sandbox/file`) checks a signed token and builds every key,
+  channel and thread from the token's claims, never from the request body. Each token purpose signs
+  with its own key (`src/callback-token.ts`): `reply` (the runner only; Claude never sees it),
+  `tools` (Claude's, for upload and canvas), `file` (one grant per Slack file, `src/files.ts`). Text a sandbox sends for Slack is capped and escaped (`src/status.ts`).
 - Slack's own routes (`/slack/events`, `/slack/interactive`) check the signing secret before reading
   the body. The Stop button only marks the turn (rule 6 in `src/thread.ts`); the sandbox ends it.
 - Never put the Slack bot token, the signing secret or `CALLBACK_SECRET` into a sandbox
   (`test/sandbox-config.test.ts` checks this).
 - Sandboxes pause on timeout, never kill: the Claude transcript lives on the sandbox's disk.
 - Secrets go in with `npx wrangler secret put`. Never commit `.dev.vars` or a key.
-- `box/` files are written into every sandbox on every turn (`run-turn.mjs` imports `progress.mjs`
-  and `inbox.mjs` from beside it, and `inbox-hook.mjs` imports `inbox.mjs`; a new box file must be added to the write list in `src/sandbox.ts`). A change there reaches running threads
+- `box/` files are written into every sandbox on every turn (`run-turn.mjs` imports `progress.mjs`,
+  `inbox.mjs` and `files.mjs` from beside it, and `inbox-hook.mjs` imports `inbox.mjs`; a new box file must be added to the write list in `src/sandbox.ts`). A change there reaches running threads
   on the next deploy; a change to `template/Dockerfile` needs `npm run template:build`.

@@ -129,6 +129,15 @@ can only read and write code and pull requests.
   an R2 bucket through `/sandbox/transcript`, using its one-turn token. The Worker picks the object
   key from the token (`transcripts/<channel>/<thread>/<turn>.jsonl.gz`), so a sandbox can only write
   its own thread's backups. Backups are kept forever; a D1 table indexes them.
+- **Files go both ways, without the Slack token.** Files dropped in the thread reach Claude as files
+  in `~/work/slack-files/`. When a turn starts, the Worker writes a manifest into the sandbox with a
+  signed grant for each file that turn's messages carried. Before Claude starts, the sandbox swaps
+  each grant for the bytes at `/sandbox/file`, which checks the grant, asks Slack the file is in that
+  channel, and streams it through with the bot token. A grant opens one file in one thread, so
+  Claude can never pull a file from another channel. Claude posts files and canvases back with
+  `node ~/.agent/tools.mjs upload|canvas` (`/sandbox/upload`, `/sandbox/canvas`), using a second
+  token of its own that can only post into its own thread, and cannot deliver the answer or stop the
+  turn. A canvas is shared with the channel, so its members can edit it.
 - **The Slack token never enters the sandbox.** The sandbox gets a token that can post one turn's answer
   into one thread, and it expires. Claude reads text anyone can write, so the sandbox holds as little
   as possible.
@@ -144,10 +153,13 @@ can only read and write code and pull requests.
 | `src/models.ts` | The `!model` aliases and their model ids, in one place |
 | `src/status.ts` | The live status message and the Stop button: the line, its caps, reading a click |
 | `src/transcripts.ts` | The transcript backup rules: the R2 key, the size limit |
+| `src/files.ts` | The file rules, both ways: grants, caps, the checks on uploads and canvases |
 | `src/db.ts` | The D1 database helpers |
 | `migrations/` | The D1 tables. `npm run setup` applies them |
 | `box/run-turn.mjs` | Runs inside the sandbox: runs Claude, reports progress, posts the answer back |
 | `box/progress.mjs` | Runs inside the sandbox: turns Claude's stream events into the status line |
+| `box/files.mjs` | Runs inside the sandbox: downloads the turn's files before Claude starts |
+| `box/tools.mjs` | Runs inside the sandbox: Claude's commands to post a file or a canvas into its thread |
 | `box/inbox.mjs`, `box/inbox-hook.mjs` | Runs inside the sandbox: follow-ups sent mid-turn, and the hook that hands them to Claude |
 | `box/CLAUDE.md` | The instructions Claude reads in the sandbox. Edit this to change the bot's behavior. |
 | `template/Dockerfile` | The sandbox image. Run `npm run template:build` after you change it. |

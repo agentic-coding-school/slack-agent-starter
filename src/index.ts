@@ -1,8 +1,9 @@
 import { verifyCallbackToken } from './callback-token.ts'
 import { recordTranscript } from './db.ts'
 import type { Env } from './env.ts'
+import { canvasLinkText, checkCanvas, checkUpload, downloadHeaders, filesFromEvent, fileSharedIn, hostedOutsideSlack, looksLikeSignInPage, MAX_FILE_BYTES, verifyFileGrant } from './files.ts'
 import { parseModelCommand } from './models.ts'
-import { deleteMessage, postInThread, react, updateMessage, verifySlackSignature } from './slack.ts'
+import { createCanvas, deleteMessage, fileInfo, postInThread, postMessage, react, updateMessage, uploadToThread, verifySlackSignature } from './slack.ts'
 import { followUrl, parseStopClick, statusBlocks, statusLine } from './status.ts'
 import { threadStub } from './thread-state.ts'
 import { checkTranscriptSize, transcriptKey } from './transcripts.ts'
@@ -19,6 +20,9 @@ export { ThreadState } from './thread-state.ts'
  *   POST /sandbox/transcript  A sandbox backing up its Claude transcript to R2, same token.
  *   POST /sandbox/progress  A sandbox saying what Claude is doing (the status message), same token.
  *                           The answer says whether to stop, and hands over follow-ups sent mid-turn.
+ *   GET  /sandbox/file      A sandbox fetching one file sent in its thread, with that file's grant.
+ *   POST /sandbox/upload    Claude posting a file into its own thread, with the turn's tools token.
+ *   POST /sandbox/canvas    Claude posting a canvas into its own thread, same tools token.
  *   queue                   Starts a turn in a sandbox (src/turn.ts).
  *
  * Plus the thread's alarm (src/thread-state.ts), which pauses quiet sandboxes.
@@ -31,6 +35,9 @@ export default {
     if (request.method === 'POST' && url.pathname === '/sandbox/callback') return sandboxCallback(request, env)
     if (request.method === 'POST' && url.pathname === '/sandbox/progress') return sandboxProgress(request, env)
     if (request.method === 'POST' && url.pathname === '/sandbox/transcript') return sandboxTranscript(request, env)
+    if (request.method === 'GET' && url.pathname === '/sandbox/file') return sandboxFile(request, env)
+    if (request.method === 'POST' && url.pathname === '/sandbox/upload') return sandboxUpload(request, env)
+    if (request.method === 'POST' && url.pathname === '/sandbox/canvas') return sandboxCanvas(request, env)
     if (url.pathname === '/') return new Response('slack-agent is running. Point Slack at /slack/events.\n')
     return new Response('not found', { status: 404 })
   },
@@ -83,8 +90,8 @@ async function slackEvents(request: Request, env: Env, ctx: ExecutionContext) {
   const origin = url(request)
 
   // Ignore bots (ourselves included), edits, deletes, joins and the like. A message with a file, or
-  // a reply also sent to the channel, is still a message from a person. (The bot reads its text;
-  // it does not download the file.)
+  // a reply also sent to the channel, is still a message from a person. Its files reach Claude when
+  // its turn starts (src/files.ts).
   const personSubtypes = new Set(['file_share', 'thread_broadcast'])
   if (event.bot_id || !event.user || event.user === botUserId) return new Response('ok')
   if (event.subtype && !personSubtypes.has(event.subtype)) return new Response('ok')
@@ -97,8 +104,15 @@ async function slackEvents(request: Request, env: Env, ctx: ExecutionContext) {
 
   // In a DM every message is its own thread unless the user replies in one.
   const threadTs = event.thread_ts ?? event.ts
-  const hasFiles = Boolean(event.files?.length) || event.subtype === 'file_share'
-  const msg = { ts: event.ts, user: event.user, text: stripMention(event.text ?? '', botUserId), ...(hasFiles ? { hasFiles } : {}) }
+  const files = filesFromEvent(event.files)
+  const hasFiles = files.length > 0 || event.subtype === 'file_share'
+  const msg = {
+    ts: event.ts,
+    user: event.user,
+    text: stripMention(event.text ?? '', botUserId),
+    ...(hasFiles ? { hasFiles } : {}),
+    ...(files.length ? { files } : {}),
+  }
 
   const thread = threadStub(env, event.channel, threadTs)
 
@@ -265,6 +279,92 @@ async function slackInteractive(request: Request, env: Env, ctx: ExecutionContex
     )
   }
   return new Response('')
+}
+
+/**
+ * One file from the thread, for the runner (box/files.mjs). The grant names the file, channel and
+ * thread (src/files.ts); Slack is asked whether the file is still in that channel before a byte
+ * moves. The bytes stream through and are never held here.
+ */
+async function sandboxFile(request: Request, env: Env) {
+  const grant = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
+  const verified = await verifyFileGrant(env.CALLBACK_SECRET, grant)
+  if (!verified.ok) return Response.json({ ok: false, error: verified.reason }, { status: 401 })
+  const { channel, fileId } = verified.claims
+
+  let file: Record<string, unknown> | null
+  try {
+    file = await fileInfo(env, fileId)
+  } catch (err) {
+    // missing_scope here means the app was not reinstalled after files:read was added.
+    return Response.json({ ok: false, error: (err as Error).message }, { status: 502 })
+  }
+  if (!file || !fileSharedIn(file, channel)) return Response.json({ ok: false, error: 'file is not in this channel' }, { status: 403 })
+  if (hostedOutsideSlack(file)) return Response.json({ ok: false, error: 'hosted outside Slack' }, { status: 422 })
+  if (typeof file.size === 'number' && file.size > MAX_FILE_BYTES) return Response.json({ ok: false, error: 'too large' }, { status: 413 })
+  const source = (file.url_private_download ?? file.url_private) as string | undefined
+  if (!source) return Response.json({ ok: false, error: 'Slack gave no download link' }, { status: 502 })
+
+  const upstream = await fetch(source, { headers: { authorization: `Bearer ${env.SLACK_BOT_TOKEN}` } })
+  if (!upstream.ok || !upstream.body) return Response.json({ ok: false, error: `Slack answered ${upstream.status}` }, { status: 502 })
+  if (looksLikeSignInPage(upstream.headers, file)) {
+    await upstream.body.cancel()
+    return Response.json({ ok: false, error: 'Slack sent its sign-in page: reinstall the app so the token has files:read' }, { status: 502 })
+  }
+  return new Response(upstream.body, { headers: downloadHeaders(upstream.headers, file) })
+}
+
+/**
+ * A file from Claude (box/tools.mjs upload), posted into its own thread. Checked before the body is
+ * read; the channel and thread come from the token only.
+ */
+async function sandboxUpload(request: Request, env: Env) {
+  const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
+  const verified = await verifyCallbackToken(env.CALLBACK_SECRET, token, request.headers.get('x-turn-id') ?? '', Date.now(), 'tools')
+  if (!verified.ok) return Response.json({ ok: false, error: verified.reason }, { status: 401 })
+
+  const checked = checkUpload({
+    contentLength: request.headers.get('content-length'),
+    filename: request.headers.get('x-filename'),
+    title: request.headers.get('x-title'),
+    comment: request.headers.get('x-comment'),
+  })
+  if (!checked.ok) return Response.json({ ok: false, error: checked.error }, { status: checked.status })
+
+  const { channel, threadTs, turnId } = verified.claims
+  const bytes = await request.arrayBuffer()
+  if (bytes.byteLength !== checked.size) return Response.json({ ok: false, error: 'body does not match content-length' }, { status: 400 })
+  try {
+    const permalink = await uploadToThread(env, { channel, threadTs, bytes, ...checked.upload })
+    console.log(`turn ${turnId} posted a file (${bytes.byteLength} bytes)`)
+    return Response.json({ ok: true, permalink })
+  } catch (err) {
+    console.error(`turn ${turnId}: upload failed:`, err)
+    return Response.json({ ok: false, error: (err as Error).message }, { status: 502 })
+  }
+}
+
+/** A canvas from Claude (box/tools.mjs canvas): made, shared with the channel, linked in the thread. */
+async function sandboxCanvas(request: Request, env: Env) {
+  const body = (await request.json().catch(() => null)) as { turnId?: string } | null
+  const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
+  const verified = await verifyCallbackToken(env.CALLBACK_SECRET, token, body?.turnId ?? '', Date.now(), 'tools')
+  if (!verified.ok) return Response.json({ ok: false, error: verified.reason }, { status: 401 })
+
+  const checked = checkCanvas(body)
+  if (!checked.ok) return Response.json({ ok: false, error: checked.error }, { status: 400 })
+
+  const { channel, threadTs, turnId } = verified.claims
+  try {
+    const { permalink } = await createCanvas(env, { channel, title: checked.title, markdown: checked.markdown })
+    // Already Slack mrkdwn (a <link|title>), so it skips the Markdown conversion postInThread does.
+    await postMessage(env, { channel, thread_ts: threadTs, text: canvasLinkText(checked.title, permalink) })
+    console.log(`turn ${turnId} made a canvas`)
+    return Response.json({ ok: true, permalink })
+  } catch (err) {
+    console.error(`turn ${turnId}: canvas failed:`, err)
+    return Response.json({ ok: false, error: (err as Error).message }, { status: 502 })
+  }
 }
 
 /**

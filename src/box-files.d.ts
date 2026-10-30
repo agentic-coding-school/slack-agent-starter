@@ -20,3 +20,11 @@ declare module '*/inbox-hook.mjs' {
   const text: string
   export default text
 }
+declare module '*/files.mjs' {
+  const text: string
+  export default text
+}
+declare module '*/tools.mjs' {
+  const text: string
+  export default text
+}
