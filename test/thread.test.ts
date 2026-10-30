@@ -157,6 +157,45 @@ test('a turn whose job could not be queued is undone, so Slack retrying the even
   if (retry.action === 'start') assert.equal(retry.turn.firstTurn, true)
 })
 
+test('a follow-up that joined a turn whose job could not be queued is not lost', () => {
+  const data = fresh()
+  const newTurnId = ids()
+  const r = accept(data, msg('100.0'), { mention: true, now: 0, newTurnId })
+  if (r.action !== 'start') throw new Error('expected a start')
+  // While the events route awaits the queue send, a follow-up joins the running turn.
+  assert.equal(accept(data, msg('101.0'), { mention: false, now: 1, newTurnId }).action, 'midturn')
+  abortStart(data, r.turn)
+
+  assert.equal(data.running, null)
+  assert.deepEqual(data.pending.map((m) => m.ts), ['101.0'])
+  assert.equal(data.known, true)
+  // Slack's retry of the follow-up is still a duplicate (it already has its 📨)...
+  assert.equal(accept(data, msg('101.0'), { mention: false, now: 2, newTurnId }).action, 'skip')
+  // ...and the alarm runs it, as the first turn, so it still reads the history.
+  const alarm = onAlarm(data, { maxTurnMs: 1000, idlePauseMs: 100, now: 10_000, newTurnId })
+  if (alarm.action !== 'start') throw new Error('expected a start')
+  assert.deepEqual(alarm.next.messages.map((m) => m.ts), ['101.0'])
+  assert.equal(alarm.next.firstTurn, true)
+})
+
+test('a follow-up returned by an undone start waits behind the retried original', () => {
+  const data = fresh()
+  const newTurnId = ids()
+  const r = accept(data, msg('100.0'), { mention: true, now: 0, newTurnId })
+  if (r.action !== 'start') throw new Error('expected a start')
+  accept(data, msg('101.0'), { mention: false, now: 1, newTurnId })
+  abortStart(data, r.turn)
+
+  const retry = accept(data, msg('100.0'), { mention: true, now: 2, newTurnId })
+  if (retry.action !== 'start') throw new Error('expected a start')
+  assert.deepEqual(retry.turn.messages.map((m) => m.ts), ['100.0'])
+  assert.equal(retry.turn.firstTurn, true)
+  const done = finish(data, retry.turn.turnId, { now: 3, newTurnId })
+  if (!done.accepted || !done.next) throw new Error('expected the follow-up next')
+  assert.deepEqual(done.next.messages.map((m) => m.ts), ['101.0'])
+  assert.equal(done.next.firstTurn, false)
+})
+
 test('a next turn that could not be queued goes back to pending, and the alarm starts it', () => {
   const data = fresh()
   const newTurnId = ids()

@@ -66,6 +66,8 @@ export class ThreadState extends DurableObject<Env> {
     if (!data) return
     abortStart(data, turn)
     await this.save(data)
+    // Follow-ups returned to pending need the alarm to run them.
+    await this.armAlarm(data)
   }
 
   /**

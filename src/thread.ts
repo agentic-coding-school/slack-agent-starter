@@ -181,15 +181,22 @@ export function applyModelCommand(
 
 /**
  * The job for a turn could not be queued. Undo the start so Slack's retry of the same event is
- * not dropped as a duplicate.
+ * not dropped as a duplicate. Follow-ups that joined the turn while its job was being queued
+ * (rule 7) already have their 📨 and stay in `seen`, so Slack's retry of them is skipped: they go
+ * back in line instead, and the alarm runs them if no retry starts a turn first.
  */
 export function abortStart(data: ThreadData, turn: Turn) {
   if (data.running?.turnId !== turn.turnId) return
+  const inbox = data.running.inbox ?? []
   data.running = null
   const ids = new Set(turn.messages.map((m) => m.ts))
   data.seen = data.seen.filter((ts) => !ids.has(ts))
-  // A thread a `!model` message made ours stays ours; its first turn is still to come.
-  if (turn.firstTurn && !data.historyUnread) data.known = false
+  data.pending.unshift(...inbox)
+  if (!turn.firstTurn) return
+  // The thread stays ours if a `!model` message made it ours, or a follow-up is waiting; either
+  // way the first turn is still to come, so it still reads the history.
+  if (inbox.length) data.historyUnread = true
+  else if (!data.historyUnread) data.known = false
 }
 
 /**
@@ -331,7 +338,7 @@ function remember(data: ThreadData, ts: string) {
 function takePending(data: ThreadData, opts: Clock): Turn | null {
   if (!data.pending.length) return null
   const messages = data.pending.splice(0)
-  return begin(data, messages, false, opts)
+  return begin(data, messages, data.historyUnread === true, opts)
 }
 
 function begin(data: ThreadData, messages: SlackMessage[], firstTurn: boolean, opts: Clock): Turn {
