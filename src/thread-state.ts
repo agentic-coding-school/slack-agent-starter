@@ -1,0 +1,154 @@
+import { DurableObject } from 'cloudflare:workers'
+import { idlePauseMs, maxTurnMs, type Env } from './env.ts'
+import { pauseThreadSandbox } from './sandbox.ts'
+import { postInThread } from './slack.ts'
+import {
+  abortStart,
+  accept,
+  afterPause,
+  emptyThread,
+  finish,
+  LOST_TURN_MARGIN_MS,
+  onAlarm,
+  requeue,
+  type AcceptResult,
+  type FinishResult,
+  type SlackMessage,
+  type ThreadData,
+  type Turn,
+} from './thread.ts'
+import { enqueueTurn } from './turn.ts'
+
+/** How soon the alarm retries a turn whose job could not be queued. */
+const REQUEUE_DELAY_MS = 10_000
+
+/**
+ * One Durable Object per Slack thread (named `channel:threadTs`). The rules live in src/thread.ts;
+ * this class loads the thread, applies a rule, and saves it.
+ *
+ * A Durable Object runs one call at a time ONLY between awaits on the network: while it waits on a
+ * fetch, other calls run. So every method saves its changes before it calls out, and reloads the
+ * thread after, never writing back a copy it loaded earlier.
+ *
+ * Its one alarm pauses the sandbox once the thread goes quiet, frees a thread whose turn never
+ * reported back, and retries a turn whose job could not be queued.
+ */
+export class ThreadState extends DurableObject<Env> {
+  async accept(channel: string, threadTs: string, origin: string, msg: SlackMessage, mention: boolean): Promise<AcceptResult> {
+    const data = await this.load(channel, threadTs, origin)
+    data.origin = origin
+    const result = accept(data, msg, { mention, ...this.clock() })
+    if (result.action !== 'skip') await this.save(data)
+    if (result.action === 'start') await this.armAlarm(data)
+    return result
+  }
+
+  /** The events route could not queue the turn: undo it so Slack's retry runs it. */
+  async abortStart(turn: Turn) {
+    const data = await this.ctx.storage.get<ThreadData>('thread')
+    if (!data) return
+    abortStart(data, turn)
+    await this.save(data)
+  }
+
+  /** The turn is over. Starts the next turn if messages waited for this one. */
+  async finish(turnId: string): Promise<FinishResult> {
+    const data = await this.ctx.storage.get<ThreadData>('thread')
+    if (!data) return { accepted: false }
+    const result = finish(data, turnId, this.clock())
+    if (!result.accepted) return result
+    await this.save(data)
+    if (result.next) await this.start(result.next)
+    await this.armAlarm((await this.ctx.storage.get<ThreadData>('thread'))!)
+    return result
+  }
+
+  async alarm() {
+    const data = await this.ctx.storage.get<ThreadData>('thread')
+    if (!data) return
+    const result = onAlarm(data, { maxTurnMs: maxTurnMs(this.env), idlePauseMs: idlePauseMs(this.env), ...this.clock() })
+
+    switch (result.action) {
+      case 'none':
+        return
+      case 'wait':
+        await this.ctx.storage.setAlarm(result.until)
+        return
+      case 'start':
+        await this.save(data)
+        await this.start(result.next)
+        break
+      case 'stale':
+        await this.save(data)
+        console.warn(`turn lost thread=${data.channel}:${data.threadTs} turn=${result.lostTurnId}`)
+        await postInThread(this.env, data.channel, data.threadTs, ':warning: My last run stopped without a reply. Send your message again to retry.').catch(
+          (err) => console.error('could not post the lost-turn note:', err),
+        )
+        if (result.next) await this.start(result.next)
+        break
+      case 'pause': {
+        // `pausing` is saved BEFORE the call, so a message that arrives while it runs waits
+        // instead of starting a turn the pause would freeze.
+        await this.save(data)
+        let paused = false
+        try {
+          await pauseThreadSandbox(this.env, data.channel, data.threadTs)
+          paused = true
+        } catch (err) {
+          console.error(`pause failed for ${data.channel}:${data.threadTs}; retrying in a minute:`, err)
+        }
+        const fresh = (await this.ctx.storage.get<ThreadData>('thread'))!
+        const next = afterPause(fresh, { paused, ...this.clock() })
+        await this.save(fresh)
+        if (next) await this.start(next)
+        // If every retry fails, the sandbox's own timeout pauses it anyway (see src/sandbox.ts),
+        // so a thread never loses its history.
+        if (!paused && !next) {
+          await this.ctx.storage.setAlarm(Date.now() + 60_000)
+          return
+        }
+        break
+      }
+    }
+    await this.armAlarm((await this.ctx.storage.get<ThreadData>('thread'))!)
+  }
+
+  /** Queues a turn already saved as running. If the queue refuses, put it back for the alarm. */
+  private async start(turn: Turn) {
+    try {
+      const data = (await this.ctx.storage.get<ThreadData>('thread'))!
+      await enqueueTurn(this.env, data, turn)
+    } catch (err) {
+      console.error(`could not queue turn ${turn.turnId}; retrying from the alarm:`, err)
+      const data = (await this.ctx.storage.get<ThreadData>('thread'))!
+      requeue(data, turn)
+      await this.save(data)
+      await this.ctx.storage.setAlarm(Date.now() + REQUEUE_DELAY_MS)
+    }
+  }
+
+  private async armAlarm(data: ThreadData) {
+    if (data.pending.length && !data.running) return this.ctx.storage.setAlarm(Date.now() + REQUEUE_DELAY_MS)
+    if (data.parked && !data.running) return
+    const at = data.running
+      ? data.running.startedAt + maxTurnMs(this.env) + LOST_TURN_MARGIN_MS
+      : data.lastActivityAt + idlePauseMs(this.env)
+    await this.ctx.storage.setAlarm(at)
+  }
+
+  private clock() {
+    return { now: Date.now(), newTurnId: () => crypto.randomUUID() }
+  }
+
+  private async load(channel: string, threadTs: string, origin: string) {
+    return (await this.ctx.storage.get<ThreadData>('thread')) ?? emptyThread(channel, threadTs, origin)
+  }
+
+  private async save(data: ThreadData) {
+    await this.ctx.storage.put('thread', data)
+  }
+}
+
+export function threadStub(env: Env, channel: string, threadTs: string) {
+  return env.THREADS.get(env.THREADS.idFromName(`${channel}:${threadTs}`))
+}

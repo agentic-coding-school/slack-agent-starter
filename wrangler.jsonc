@@ -1,0 +1,39 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "slack-agent",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": true },
+
+  // Workers Paid. A turn launch talks to the sandbox provider several times and the
+  // pause call can take over a minute, which the free plan's 10 ms of CPU cannot fit.
+  "limits": { "cpu_ms": 300000 },
+
+  // One object per Slack thread. It is the lock that keeps one Claude turn running
+  // per thread, and its alarm pauses the thread's sandbox once the thread goes quiet.
+  "durable_objects": { "bindings": [{ "name": "THREADS", "class_name": "ThreadState" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ThreadState"] }],
+
+  // Slack wants an answer in 3 seconds; starting a sandbox takes longer. The events
+  // route answers at once and this queue does the launch, with retries.
+  "queues": {
+    "producers": [{ "binding": "TURNS", "queue": "slack-agent-turns" }],
+    "consumers": [{ "queue": "slack-agent-turns", "max_batch_size": 1, "max_retries": 3 }]
+  },
+
+  // The script the sandbox runs for each turn, and the instructions Claude reads there.
+  "rules": [{ "type": "Text", "globs": ["**/box/*.md", "**/box/*.mjs"], "fallthrough": true }],
+
+  "vars": {
+    // "e2b" or "impello". `npm run setup` sets this for you.
+    "SANDBOX_PROVIDER": "e2b",
+    "SANDBOX_TEMPLATE": "slack-agent",
+    // How long one Claude turn may run. Keep it under 50 minutes on E2B Hobby,
+    // which stops a sandbox after 1 hour of continuous running.
+    "MAX_TURN_MINUTES": "45",
+    // How long a thread may sit quiet before its sandbox is paused.
+    "IDLE_PAUSE_MINUTES": "5"
+  }
+}

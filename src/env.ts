@@ -1,0 +1,55 @@
+import type { ThreadState } from './thread-state.ts'
+import type { TurnJob } from './turn.ts'
+
+/**
+ * Everything the Worker reads from Cloudflare. Secrets are set with `wrangler secret put`
+ * (`npm run setup` does it for you); vars live in wrangler.jsonc.
+ */
+export interface Env {
+  THREADS: DurableObjectNamespace<ThreadState>
+  TURNS: Queue<TurnJob>
+
+  // Slack app (Basic Information and OAuth & Permissions pages)
+  SLACK_SIGNING_SECRET: string
+  SLACK_BOT_TOKEN: string
+
+  // Sandbox provider
+  SANDBOX_PROVIDER: string
+  SANDBOX_API_KEY: string
+  SANDBOX_TEMPLATE: string
+
+  // Claude: set ONE of these. See the README on which to pick.
+  CLAUDE_CODE_OAUTH_TOKEN?: string
+  ANTHROPIC_API_KEY?: string
+
+  // Signs the token a sandbox uses to post its reply back. Any long random string.
+  CALLBACK_SECRET: string
+
+  // GitHub App, optional. Set the ID and the key and the bot can open PRs.
+  GITHUB_APP_ID?: string
+  GITHUB_APP_PRIVATE_KEY?: string
+  GITHUB_INSTALLATION_ID?: string
+
+  MAX_TURN_MINUTES: string
+  IDLE_PAUSE_MINUTES: string
+}
+
+export function maxTurnMs(env: Env) {
+  return minutes(env.MAX_TURN_MINUTES, 45)
+}
+
+export function idlePauseMs(env: Env) {
+  return minutes(env.IDLE_PAUSE_MINUTES, 5)
+}
+
+function minutes(value: string | undefined, fallback: number) {
+  const n = Number(value)
+  return (Number.isFinite(n) && n > 0 ? n : fallback) * 60_000
+}
+
+/** The Claude credential to hand the sandbox, or a sentence saying what is missing. */
+export function claudeAuth(env: Env): { envs: Record<string, string> } | { missing: string } {
+  if (env.ANTHROPIC_API_KEY) return { envs: { ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY } }
+  if (env.CLAUDE_CODE_OAUTH_TOKEN) return { envs: { CLAUDE_CODE_OAUTH_TOKEN: env.CLAUDE_CODE_OAUTH_TOKEN } }
+  return { missing: 'Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY with `npx wrangler secret put`.' }
+}
