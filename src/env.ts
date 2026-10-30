@@ -52,6 +52,12 @@ export interface Env {
    */
   ACCESS_TEAM_DOMAIN?: string
   ACCESS_AUD?: string
+  /**
+   * The web UI's own hostname, a custom domain on this Worker (for example agent.example.com). Access
+   * cannot cover only /ui on workers.dev, so the UI lives here and Slack stays on workers.dev
+   * (rule 5 in src/ui.ts). Empty, the UI is not set up.
+   */
+  UI_HOST?: string
 
   MAX_TURN_MINUTES: string
   IDLE_PAUSE_MINUTES: string

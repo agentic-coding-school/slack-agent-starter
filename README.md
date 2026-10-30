@@ -140,7 +140,7 @@ gets a token for the memory repo; see [Memory](#memory).
   (up to the limit), far longer than any Worker request.
 - **You can watch it work, and stop it.** When a turn starts, the Worker posts a status message
   under your message: what Claude is doing now (`Running npm test · 14 steps · 3m`), a **Follow
-  along** link to the turn's transcript page (`/ui/follow`, part of the web UI), and a **Stop**
+  along** link to the turn's transcript page (`/ui/follow`, part of the web UI, once it is set up), and a **Stop**
   button. The sandbox reports to `/sandbox/progress` every 10 seconds and the Worker edits the
   message; the sandbox never holds the Slack token. Stop goes to `/slack/interactive` (signature
   checked), which marks the turn; the sandbox sees the mark on its next report, ends Claude, and the
@@ -191,7 +191,7 @@ gets a token for the memory repo; see [Memory](#memory).
   page, a diff, Block Kit) and a session status. See [Code channels](#code-channels).
 - **It remembers, per channel.** Claude Code's own auto memory writes notes into a folder, and the
   bot keeps that folder in your memory repo, one folder per channel. See [Memory](#memory).
-- **A web UI, behind Cloudflare Access.** `/ui` shows each thread's transcript (every prompt, tool
+- **A web UI, behind Cloudflare Access, on a domain of yours.** `/ui` shows each thread's transcript (every prompt, tool
   call and result, from the R2 backups plus the turn running now), the routines (add, edit, pause,
   delete, see runs) and the channel settings. See [Web UI](#web-ui).
 - **The Home tab** in Slack lists recent threads, routines and a link to the web UI, for public
@@ -369,11 +369,20 @@ The Worker serves a small web UI at `/ui`, plain HTML and JavaScript from `ui/`:
 - **Channels** (`/ui/channels`): watched on or off, the default model, and secrets. A secret is
   write-only: the page sets and deletes it and shows its name, and the value never comes back out.
 
+**It needs a domain of yours on Cloudflare.** Cloudflare Access can only put a path behind sign-in
+on a domain (zone) in your own Cloudflare account. On `workers.dev` its one switch covers the whole
+address, and Slack and GitHub would get its login page instead of the Worker. So the UI gets its own
+hostname, `UI_HOST` (a new subdomain such as `agent.example.com`): setup attaches it to the Worker
+as a custom domain, every UI link points there, and Slack and GitHub stay on `workers.dev`. On
+`workers.dev`, `/ui` only redirects to `UI_HOST`. Leave the Worker's workers.dev Access switch off.
+No domain on Cloudflare means no web UI; the bot works the same without it, minus the **Follow
+along** link and the Home tab's UI button.
+
 **It is behind Cloudflare Access, and the Worker checks too.** You make an Access application that
-covers the path `ui` on the Worker's host (SETUP.md step 7), with a policy that lets in only you.
+covers the whole `UI_HOST` hostname (SETUP.md step 7), with a policy that lets in only you.
 Access signs you in and adds a signed token to each request; the Worker verifies that token itself
 (`src/access.ts`: RS256, your team's keys, your application's AUD tag, not expired) on every page
-and API call. With `ACCESS_TEAM_DOMAIN` or `ACCESS_AUD` unset, it refuses everyone. A change must be
+and API call. With `UI_HOST`, `ACCESS_TEAM_DOMAIN` or `ACCESS_AUD` unset, it refuses everyone. A change must be
 a JSON POST from the page itself (its `Origin`), so another site cannot use your sign-in. The UI
 sees every channel, private ones included, so keep its Access policy to yourself.
 
@@ -397,6 +406,7 @@ In `wrangler.jsonc` under `vars`. Run `npm run deploy` after you change one.
 | `IDLE_PAUSE_MINUTES` | 5 | How long a thread may be quiet before its sandbox pauses. |
 | `SANDBOX_TEMPLATE` | `slack-agent` | The sandbox image name. |
 | `MEMORY_REPO` | (set by setup) | The memory repo, `owner/name`. Required. |
+| `UI_HOST` | (set by setup) | The web UI's own hostname, a custom domain on the Worker (also in `routes`). Empty: no web UI. |
 | `ACCESS_TEAM_DOMAIN` | (set by setup) | The web UI's Cloudflare Access team, `<team>.cloudflareaccess.com`. Empty: the UI refuses everyone. |
 | `ACCESS_AUD` | (set by setup) | The web UI's Access application AUD tag. Empty: the UI refuses everyone. |
 
@@ -420,12 +430,17 @@ In `wrangler.jsonc` under `vars`. Run `npm run deploy` after you change one.
 - **"Code channels are not turned on":** Slack refused the beta (`feature_disabled`,
   `missing_scope`, `unknown_method`). Check the app has `code_channels:manage` and Code channels on
   in its manifest and was reinstalled after; the workspace may simply not have the beta yet.
-- **The web UI says "not set up":** `ACCESS_TEAM_DOMAIN` or `ACCESS_AUD` is empty or not in the
-  right form; run setup again with them in `.env.setup`. **"another application"** means
-  `ACCESS_AUD` is not this Access application's AUD tag; **"no Access token"** means the request did
-  not come through Access (check the application's path is `ui` on the Worker's host).
-- **Slack stopped reaching the Worker after Access went on:** the Access application covers more than
-  `ui`. Edit it so the path is `ui`; `curl <worker>/` must answer "slack-agent is running".
+- **The web UI says "not set up":** `UI_HOST`, `ACCESS_TEAM_DOMAIN` or `ACCESS_AUD` is empty or
+  not in the right form (a `workers.dev` host is refused); run setup again with them in
+  `.env.setup`. **"another application"** means `ACCESS_AUD` is not this Access application's AUD
+  tag; **"no Access token"** means the request did not come through Access (check the application's
+  hostname is `UI_HOST`).
+- **The deploy fails on the custom domain:** `UI_HOST` must be on a domain in the same Cloudflare
+  account and must not already have a DNS record. Fix it, or empty it and set `"routes"` in
+  `wrangler.jsonc` back to `[]`.
+- **Slack stopped reaching the Worker after Access went on:** Access covers the `workers.dev`
+  address. Turn off the Worker's workers.dev Cloudflare Access switch (Settings > Domains & Routes)
+  and put Access on `UI_HOST` only; `curl <worker>/` must answer "slack-agent is running".
 - **The Home tab is empty or says "This is still being worked on":** reinstall the app from the
   manifest (it turns on `home_tab_enabled` and subscribes to `app_home_opened`).
 - **"Invalid API key" from Claude:** the Claude secret is wrong or expired. Run

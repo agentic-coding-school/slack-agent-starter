@@ -13,6 +13,7 @@ import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { stdin, stdout } from 'node:process'
 import { createInterface } from 'node:readline/promises'
+import { normaliseUiHost } from '../src/ui.ts'
 import { generatedSecretsToCreate, parseSecretList } from './secret-list.ts'
 
 const WRANGLER = ['npx', '--yes', 'wrangler']
@@ -50,6 +51,13 @@ function setVar(name, value) {
   const path = 'wrangler.jsonc'
   const text = readFileSync(path, 'utf8')
   writeFileSync(path, text.replace(new RegExp(`("${name}":\\s*)"[^"]*"`), `$1"${value}"`))
+}
+
+/** The Worker's routes in wrangler.jsonc. Only the UI's custom domain ever goes here; Slack uses workers.dev. */
+function setRoutes(routes) {
+  const path = 'wrangler.jsonc'
+  const text = readFileSync(path, 'utf8')
+  writeFileSync(path, text.replace(/("routes":\s*)\[[^\]]*\]/, `$1${JSON.stringify(routes)}`))
 }
 
 function findDatabaseId(name) {
@@ -140,8 +148,17 @@ const memoryRepo = (answers.MEMORY_REPO ?? '').replace(/^https:\/\/github\.com\/
 const memoryRepoOk = MEMORY_REPO_RE.test(memoryRepo)
 if (memoryRepoOk) setVar('MEMORY_REPO', memoryRepo)
 
-// The web UI's Cloudflare Access application (README, "Web UI"): plain vars too. Made after the
-// first deploy, since it needs the Worker's address. Unset, /ui refuses everyone (src/access.ts).
+// The web UI's own host (rule 5 in src/ui.ts): a custom domain on a zone in the human's Cloudflare
+// account, attached by the deploy below. Access cannot cover only /ui on workers.dev, so the UI never
+// lives there; Slack and GitHub stay on workers.dev. Unset, /ui refuses everyone.
+const uiHost = normaliseUiHost(answers.UI_HOST)
+if (uiHost) {
+  setVar('UI_HOST', uiHost)
+  setRoutes([{ pattern: uiHost, custom_domain: true }])
+}
+
+// The web UI's Cloudflare Access application (README, "Web UI"): plain vars too. Made for UI_HOST,
+// so after it exists. Unset, /ui refuses everyone (src/access.ts).
 const accessTeam = (answers.ACCESS_TEAM_DOMAIN ?? '').trim().toLowerCase().replace(/^https:\/\//, '').replace(/\/+$/, '')
 const accessAud = (answers.ACCESS_AUD ?? '').trim()
 const accessOk = /^[a-z0-9-]{1,63}(\.cloudflareaccess\.com)?$/.test(accessTeam) && /^[A-Za-z0-9]{16,128}$/.test(accessAud)
@@ -192,6 +209,12 @@ console.log(`  D1 database ${DATABASE} ready, migrations applied`)
 const deploy = wrangler(['deploy'], { capture: true })
 if (!deploy.ok) {
   console.error(deploy.out)
+  if (uiHost) {
+    console.error(
+      `NEXT: if the error above is about ${uiHost}: UI_HOST must be a hostname on a domain (zone) in this Cloudflare account, ` +
+        'with no DNS record of its own yet; the deploy makes one. Fix UI_HOST, or empty it and set "routes" in wrangler.jsonc back to [], then run again.',
+    )
+  }
   process.exit(1)
 }
 const workerUrl = deploy.out.match(/https:\/\/[^\s]+\.workers\.dev/)?.[0]
@@ -264,20 +287,28 @@ if (!memoryRepoOk) {
   )
 }
 
-if (!accessOk) {
-  const host = workerUrl ? new URL(workerUrl).host : '<worker host>'
+if (!uiHost) {
+  next.push(
+    (answers.UI_HOST ? `UI_HOST is "${answers.UI_HOST}", which is not a hostname setup can use (a workers.dev host cannot be one). ` : '') +
+      'The web UI is optional, and the bot works without it. It needs its own hostname on a domain the human has in this ' +
+      'Cloudflare account (README, "Web UI"), because Cloudflare Access cannot put only /ui behind sign-in on workers.dev: ' +
+      'its workers.dev switch covers the whole address and would lock Slack and GitHub out, so leave that switch off. ' +
+      'If they have such a domain, put a new subdomain of it into UI_HOST (for example agent.example.com) and run setup again. ' +
+      'Until then the web UI answers "not set up", and the Follow along and App Home links are left out.',
+  )
+} else if (!accessOk) {
   next.push(
     ((answers.ACCESS_TEAM_DOMAIN || answers.ACCESS_AUD) ? 'ACCESS_TEAM_DOMAIN or ACCESS_AUD is not in the right form. ' : '') +
       `The human puts the web UI behind Cloudflare Access (README, "Web UI"): Zero Trust > Access > Applications > Add an application > ` +
-      `Self-hosted, hostname ${host}, path ui, with a policy that allows only their own email. It must cover ui and nothing else, or ` +
-      'Slack and GitHub are locked out. They put its Application Audience (AUD) Tag into ACCESS_AUD and the team domain ' +
+      `Self-hosted, hostname ${uiHost} (the whole host; leave the path empty), with a policy that allows only their own email. ` +
+      'Slack and GitHub stay on workers.dev, so this does not touch them. They put its Application Audience (AUD) Tag into ACCESS_AUD and the team domain ' +
       '(Zero Trust > Settings, <team>.cloudflareaccess.com) into ACCESS_TEAM_DOMAIN, and you run setup again. Until then the ' +
-      'web UI, the Follow along link and the App Home link answer "not set up".',
+      'web UI answers "not set up", and the Follow along and App Home links are left out.',
   )
 }
 
 rl?.close()
-console.log(`\n${bold('Setup ran.')} Worker: ${workerUrl ?? '?'}`)
+console.log(`\n${bold('Setup ran.')} Worker: ${workerUrl ?? '?'}${uiHost ? `  Web UI: https://${uiHost}/ui/` : ''}`)
 if (next.length) {
   for (const n of next) console.log(`NEXT: ${n}`)
 } else {
@@ -326,8 +357,9 @@ async function askEverything() {
   console.log('\nThe webhook secret is the string you typed into the GitHub App\'s Webhook secret field.')
   a.GITHUB_WEBHOOK_SECRET = await askHidden('GitHub App webhook secret (Enter to skip):')
 
-  console.log('\nThe web UI sits behind Cloudflare Access (README, "Web UI"). Its application needs the Worker URL,')
-  console.log('so skip these on the first run; setup then tells you how to make it.')
+  console.log('\nThe web UI is optional. It needs its own hostname on a domain you have in Cloudflare, for example')
+  console.log('agent.example.com, behind Cloudflare Access (README, "Web UI"). Skip these if you have no such domain.')
+  a.UI_HOST = (await rl.question('Web UI hostname (Enter to skip): ')).trim()
   a.ACCESS_TEAM_DOMAIN = (await rl.question('Access team domain, <team>.cloudflareaccess.com (Enter to skip): ')).trim()
   a.ACCESS_AUD = (await rl.question('Access application AUD tag (Enter to skip): ')).trim()
   return a

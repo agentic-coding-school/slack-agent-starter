@@ -4,7 +4,12 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
+  // Slack and GitHub reach the Worker on its workers.dev address.
   "workers_dev": true,
+  // The web UI's own host, a custom domain on a zone in your Cloudflare account (README, "Web UI").
+  // Cloudflare Access cannot cover only /ui on workers.dev, so the UI lives here instead. `npm run
+  // setup` writes it from UI_HOST, for example [{ "pattern": "agent.example.com", "custom_domain": true }].
+  "routes": [],
   "observability": { "enabled": true },
 
   // Workers Paid. A turn launch talks to the sandbox provider several times and the
@@ -53,9 +58,11 @@
     // The bot's memory: a private GitHub repo, owner/name, with the GitHub App installed on it.
     // One folder per Slack channel (src/memory.ts). `npm run setup` sets this for you.
     "MEMORY_REPO": "",
-    // The web UI (/ui) sits behind Cloudflare Access, and the Worker checks Access's JWT too. Your
-    // Zero Trust team domain (for example myteam.cloudflareaccess.com) and the Access application's
-    // AUD tag. Empty means the UI refuses everyone. `npm run setup` sets them (README, "Web UI").
+    // The web UI (/ui) sits on its own host behind Cloudflare Access, and the Worker checks Access's
+    // JWT too. UI_HOST is that host (the custom domain in "routes"); then your Zero Trust team domain
+    // (for example myteam.cloudflareaccess.com) and the Access application's AUD tag. Any of them
+    // empty means the UI refuses everyone. `npm run setup` sets them (README, "Web UI").
+    "UI_HOST": "",
     "ACCESS_TEAM_DOMAIN": "",
     "ACCESS_AUD": ""
   }

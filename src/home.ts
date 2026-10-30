@@ -37,9 +37,9 @@ export async function visibleChannels(channels: string[], viewerDm: string | nul
   return new Set(unique.filter((_, i) => verdicts[i]))
 }
 
-export function homeView(opts: { origin: string; uiReady: boolean; threads: ThreadSummary[]; routines: HomeRoutine[] }) {
+/** `uiOrigin` is the web UI's (uiOrigin in src/ui.ts), or null while it is not set up. */
+export function homeView(opts: { uiOrigin: string | null; threads: ThreadSummary[]; routines: HomeRoutine[] }) {
   const blocks: unknown[] = []
-  const ui = new URL('/ui/', opts.origin).toString()
   blocks.push({ type: 'header', text: { type: 'plain_text', text: 'Your Claude agent' } })
   blocks.push({
     type: 'section',
@@ -48,10 +48,10 @@ export function homeView(opts: { origin: string; uiReady: boolean; threads: Thre
       text: '@mention me in a channel, or message me here, and I run Claude Code in a sandbox for the thread. `!model sonnet` picks a model for a thread.',
     },
   })
-  if (opts.uiReady) {
+  if (opts.uiOrigin) {
     blocks.push({
       type: 'actions',
-      elements: [{ type: 'button', text: { type: 'plain_text', text: 'Open the web UI' }, url: ui, action_id: 'open_ui' }],
+      elements: [{ type: 'button', text: { type: 'plain_text', text: 'Open the web UI' }, url: new URL('/ui/', opts.uiOrigin).toString(), action_id: 'open_ui' }],
     })
     blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: 'Transcripts, routines and channel settings. Sign-in through Cloudflare Access.' }] })
   } else {
@@ -66,7 +66,7 @@ export function homeView(opts: { origin: string; uiReady: boolean; threads: Thre
   }
   for (const t of threads) {
     const when = slackDate(t.last_at)
-    const link = opts.uiReady ? ` · <${followUrl(opts.origin, t.channel, t.thread_ts)}|transcript>` : ''
+    const link = opts.uiOrigin ? ` · <${followUrl(opts.uiOrigin, t.channel, t.thread_ts)}|transcript>` : ''
     blocks.push({
       type: 'section',
       text: { type: 'mrkdwn', text: `${where(t.channel)} · ${t.turns} ${t.turns === 1 ? 'turn' : 'turns'} · ${when}${link}` },

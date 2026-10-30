@@ -9,6 +9,7 @@ import { launchTurn } from './sandbox.ts'
 import { deleteMessage, postInThread, postMessage, react, threadHistory } from './slack.ts'
 import { followUrl, statusBlocks, statusLine } from './status.ts'
 import { threadStub } from './thread-state.ts'
+import { uiOrigin } from './ui.ts'
 import type { ThreadData, Turn } from './thread.ts'
 
 export interface TurnJob {
@@ -136,7 +137,7 @@ async function postStatus(env: Env, job: TurnJob) {
       text: 'Working…',
       blocks: statusBlocks({
         line: statusLine({ elapsedMs: Date.now() - turn.startedAt }),
-        followUrl: followUrl(job.origin, channel, threadTs),
+        followUrl: followUrl(uiOrigin(env), channel, threadTs),
         turnId: turn.turnId,
       }),
     })

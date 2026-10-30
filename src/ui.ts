@@ -10,8 +10,14 @@
  *    own channel's routines) it lists and edits all of them. Who may open it is set in Access.
  * 4. SECRETS ARE WRITE-ONLY. The page can set or delete a channel secret and see its name; a value
  *    never comes back out (src/channels.ts).
+ * 5. THE UI HAS ITS OWN HOST. Cloudflare Access can only put a path behind sign-in on a domain in
+ *    your own Cloudflare account; on workers.dev its one switch covers the whole host, which would
+ *    lock Slack and GitHub out. So the UI lives on a custom domain (UI_HOST, attached to this Worker
+ *    by `npm run setup`), Access covers that host, and Slack and GitHub stay on workers.dev. Every
+ *    link to the UI uses UI_HOST. Without UI_HOST and Access both set, the UI is not set up.
  */
 
+import { accessConfig } from './access.ts'
 import { isChannelId, type Checked } from './channels.ts'
 import { isModelAlias, type ModelAlias } from './models.ts'
 import { checkRoutineAction, isRoutineId } from './routines.ts'
@@ -23,6 +29,23 @@ export function checkWrite(req: { method: string; contentType: string | null; or
   if (!(req.contentType ?? '').toLowerCase().startsWith('application/json')) return 'changes are sent as JSON'
   if (req.origin !== req.selfOrigin) return 'changes must come from this site'
   return null
+}
+
+/**
+ * Rule 5: UI_HOST as a bare lowercase hostname, or null. A URL, a path or a port is trimmed or
+ * refused, and so is a workers.dev host: Access cannot cover one path there without covering Slack's.
+ */
+export function normaliseUiHost(raw: string | undefined): string | null {
+  const host = (raw ?? '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/+$/, '')
+  if (!/^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(host)) return null
+  if (host === 'workers.dev' || host.endsWith('.workers.dev')) return null
+  return host
+}
+
+/** Rule 5: `https://<UI_HOST>` when the UI is set up (its host and Access both), else null. */
+export function uiOrigin(env: { UI_HOST?: string; ACCESS_TEAM_DOMAIN?: string; ACCESS_AUD?: string }): string | null {
+  const host = normaliseUiHost(env.UI_HOST)
+  return host && accessConfig(env) ? `https://${host}` : null
 }
 
 /** A Slack message ts, as a thread id: seconds, a dot, microseconds. */

@@ -23,6 +23,7 @@ import { threadStub } from './thread-state.ts'
 import { checkTranscriptSize, transcriptKey } from './transcripts.ts'
 import { checkLiveEntries } from './live.ts'
 import { publishHome, uiRoute } from './ui-routes.ts'
+import { uiOrigin } from './ui.ts'
 import { DONE_EMOJI, FAILED_EMOJI, MIDTURN_EMOJI, QUEUED_EMOJI, runTurnJob, STOPPED_EMOJI, WORKING_EMOJI, type TurnJob } from './turn.ts'
 
 export { ThreadState } from './thread-state.ts'
@@ -141,7 +142,7 @@ async function slackEvents(request: Request, env: Env, ctx: ExecutionContext) {
   // The App Home tab (src/home.ts), drawn fresh each time someone opens it.
   if (event.type === 'app_home_opened') {
     if (event.tab === 'home' && event.user) {
-      ctx.waitUntil(publishHome(env, event.user, event.channel ?? null, origin).catch((err) => console.error('could not publish the App Home:', err)))
+      ctx.waitUntil(publishHome(env, event.user, event.channel ?? null).catch((err) => console.error('could not publish the App Home:', err)))
     }
     return new Response('ok')
   }
@@ -301,7 +302,7 @@ async function sandboxProgress(request: Request, env: Env) {
       channel,
       ts: view.statusTs,
       text: 'Working…',
-      blocks: statusBlocks({ line, followUrl: followUrl(new URL(request.url).origin, channel, threadTs), turnId }),
+      blocks: statusBlocks({ line, followUrl: followUrl(uiOrigin(env), channel, threadTs), turnId }),
     }).catch((err) => console.warn(`turn ${turnId}: could not update the status:`, err.message))
   }
   return Response.json({ ok: true, stop: false, messages })
@@ -341,7 +342,7 @@ async function slackInteractive(request: Request, env: Env, ctx: ExecutionContex
         channel: click.channel,
         ts: click.messageTs,
         text: 'Stopping…',
-        blocks: statusBlocks({ line, followUrl: followUrl(url(request), click.channel, click.threadTs), turnId: null }),
+        blocks: statusBlocks({ line, followUrl: followUrl(uiOrigin(env), click.channel, click.threadTs), turnId: null }),
       }).catch((err) => console.warn('could not show Stopping…:', err.message)),
     )
   } else if (result.action === 'not-running' && click.responseUrl) {

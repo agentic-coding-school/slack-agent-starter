@@ -60,10 +60,13 @@ export function formatElapsed(ms: number) {
 
 /**
  * The transcript page for a thread (/ui/follow, src/ui-routes.ts): its R2 backups and the live
- * turn. Behind Cloudflare Access, so the link carries no credential; a forwarded link opens nothing
+ * turn. `origin` is the UI's own (uiOrigin in src/ui.ts), not the Worker's; null gives no link. Behind Cloudflare Access, so the link carries no credential; a forwarded link opens nothing
  * for someone Access does not let in.
  */
-export function followUrl(origin: string, channel: string, threadTs: string) {
+export function followUrl(origin: string, channel: string, threadTs: string): string
+export function followUrl(origin: string | null, channel: string, threadTs: string): string | null
+export function followUrl(origin: string | null, channel: string, threadTs: string): string | null {
+  if (!origin) return null
   const url = new URL('/ui/follow', origin)
   url.searchParams.set('channel', channel)
   url.searchParams.set('thread', threadTs)
@@ -74,11 +77,10 @@ export function followUrl(origin: string, channel: string, threadTs: string) {
  * The status message's blocks. `chat.update` drops any block it is not sent again, so every edit
  * sends all of them: leaving out the button (`turnId: null`) is how "Stopping…" removes it.
  */
-export function statusBlocks(opts: { line: string; followUrl: string; turnId: string | null }) {
-  const blocks: unknown[] = [
-    { type: 'section', text: { type: 'mrkdwn', text: opts.line } },
-    { type: 'context', elements: [{ type: 'mrkdwn', text: `<${opts.followUrl}|Follow along>` }] },
-  ]
+export function statusBlocks(opts: { line: string; followUrl: string | null; turnId: string | null }) {
+  const blocks: unknown[] = [{ type: 'section', text: { type: 'mrkdwn', text: opts.line } }]
+  // No link while the web UI is not set up (rule 5 in src/ui.ts): it would only open "not set up".
+  if (opts.followUrl) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `<${opts.followUrl}|Follow along>` }] })
   if (opts.turnId) {
     blocks.push({
       type: 'actions',

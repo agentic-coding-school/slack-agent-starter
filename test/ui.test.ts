@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { homeView, visibleChannels, HOME_THREADS } from '../src/home.ts'
 import { followUrl } from '../src/status.ts'
 import { transcriptKey } from '../src/transcripts.ts'
-import { checkUiChannel, checkUiRoutine, checkWrite, isThreadTs, isTranscriptKeyFor, pageFor, renderPage, uiHeaders } from '../src/ui.ts'
+import { checkUiChannel, checkUiRoutine, checkWrite, isThreadTs, isTranscriptKeyFor, pageFor, renderPage, uiHeaders, normaliseUiHost, uiOrigin } from '../src/ui.ts'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const { transcriptEntries } = await import(pathToFileURL(join(root, 'ui', 'transcript.js')).href)
@@ -128,7 +128,7 @@ test('App Home rule 1: only public channels and the viewer\'s own DM are listed'
 test('App Home: recent threads, routines with escaped prompts, and the UI link only when it is set up', () => {
   const threads = Array.from({ length: 20 }, (_, i) => ({ channel: 'CPUBLIC1', thread_ts: TS, last_at: 1761800000000 + i, turns: i + 1 }))
   const routine = { id: 'abcdefghij', channel: 'CPUBLIC1', prompt: 'ping <!channel> & <@UXXXXXXXX>', cron: '0 9 * * 1', timezone: 'UTC', status: 'active', nextRun: 'Mon 3 Nov, 09:00 (UTC)' }
-  const view = homeView({ origin: 'https://w.example', uiReady: true, threads, routines: [routine] })
+  const view = homeView({ uiOrigin: 'https://w.example', threads, routines: [routine] })
   assert.equal(view.type, 'home')
   const text = JSON.stringify(view.blocks)
   assert.ok(text.includes('https://w.example/ui/'))
@@ -137,7 +137,7 @@ test('App Home: recent threads, routines with escaped prompts, and the UI link o
   assert.ok(!text.includes('<!channel>'))
   assert.equal(view.blocks.filter((b) => (b as { text?: { text?: string } }).text?.text?.includes('turn')).length, HOME_THREADS)
   assert.ok(view.blocks.length <= 100)
-  const closed = JSON.stringify(homeView({ origin: 'https://w.example', uiReady: false, threads, routines: [] }).blocks)
+  const closed = JSON.stringify(homeView({ uiOrigin: null, threads, routines: [] }).blocks)
   assert.ok(!closed.includes('/ui/'))
   assert.ok(closed.includes('not set up'))
 })
@@ -146,4 +146,29 @@ test('the manifest turns on the Home tab and subscribes to app_home_opened', () 
   const manifest = JSON.parse(readFileSync(join(root, 'slack-manifest.json'), 'utf8'))
   assert.equal(manifest.features.app_home.home_tab_enabled, true)
   assert.ok(manifest.settings.event_subscriptions.bot_events.includes('app_home_opened'))
+})
+
+test('rule 5: the UI lives on its own custom host, never workers.dev, and needs Access too', () => {
+  assert.equal(normaliseUiHost('agent.example.com'), 'agent.example.com')
+  assert.equal(normaliseUiHost(' https://Agent.Example.com/ '), 'agent.example.com')
+  assert.equal(normaliseUiHost('slack-agent.me.workers.dev'), null, 'Access cannot cover only /ui on workers.dev')
+  assert.equal(normaliseUiHost('workers.dev'), null)
+  assert.equal(normaliseUiHost('agent.example.com/ui'), null)
+  assert.equal(normaliseUiHost('agent.example.com:8443'), null)
+  assert.equal(normaliseUiHost('localhost'), null)
+  assert.equal(normaliseUiHost(''), null)
+  assert.equal(normaliseUiHost(undefined), null)
+
+  const access = { ACCESS_TEAM_DOMAIN: 'myteam', ACCESS_AUD: 'a'.repeat(64) }
+  assert.equal(uiOrigin({ ...access, UI_HOST: 'agent.example.com' }), 'https://agent.example.com')
+  assert.equal(uiOrigin({ ...access, UI_HOST: '' }), null, 'Access alone is not enough: there is no host to put it on')
+  assert.equal(uiOrigin({ UI_HOST: 'agent.example.com' }), null, 'a host without Access is not set up')
+  assert.equal(uiOrigin({ ...access, UI_HOST: 'slack-agent.me.workers.dev' }), null)
+})
+
+test('rule 5: wrangler.jsonc keeps workers.dev for Slack and has the slots setup fills for the UI host', () => {
+  const text = readFileSync(join(root, 'wrangler.jsonc'), 'utf8')
+  assert.match(text, /"workers_dev":\s*true/)
+  assert.match(text, /"routes":\s*\[\]/, 'setup replaces this with the UI_HOST custom domain')
+  assert.match(text, /"UI_HOST":\s*""/)
 })

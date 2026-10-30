@@ -2,7 +2,7 @@ import APP_JS from '../ui/app.js'
 import SHELL from '../ui/page.html'
 import STYLE from '../ui/style.css'
 import TRANSCRIPT_JS from '../ui/transcript.js'
-import { accessConfig, accessIdentity } from './access.ts'
+import { accessIdentity } from './access.ts'
 import { deleteChannelSecret, listChannels, putChannelSecret, setChannelModel, setWatched } from './channel-store.ts'
 import { isChannelId } from './channels.ts'
 import { recentThreads, threadTranscripts } from './db.ts'
@@ -14,7 +14,7 @@ import { isRoutineId } from './routines.ts'
 import { isPublicChannel } from './search.ts'
 import { channelInfo, slackApi } from './slack.ts'
 import { threadStub } from './thread-stub.ts'
-import { checkUiChannel, checkUiRoutine, checkWrite, isThreadTs, isTranscriptKeyFor, pageFor, renderPage, uiHeaders } from './ui.ts'
+import { checkUiChannel, checkUiRoutine, checkWrite, isThreadTs, isTranscriptKeyFor, pageFor, renderPage, uiHeaders, uiOrigin } from './ui.ts'
 
 /**
  * The web UI: GET pages and their API under /ui, all behind Cloudflare Access (src/access.ts). The
@@ -30,6 +30,18 @@ import { checkUiChannel, checkUiRoutine, checkWrite, isThreadTs, isTranscriptKey
 export async function uiRoute(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url)
   const isApi = url.pathname.startsWith('/ui/api/')
+  // Rule 5 in src/ui.ts: the UI answers only on its own host, behind Access. On any other host (the
+  // workers.dev one Slack uses) a page visit is sent there, and anything else is refused.
+  const home = uiOrigin(env)
+  if (!home) {
+    const error = 'The web UI is not set up: set UI_HOST, ACCESS_TEAM_DOMAIN and ACCESS_AUD (README, "Web UI").'
+    console.warn(`ui refused ${url.pathname}: not set up`)
+    return isApi ? json({ ok: false, error }, 503) : new Response(`${error}\n`, { status: 503, headers: uiHeaders('text/plain; charset=utf-8') })
+  }
+  if (url.origin !== home) {
+    if (request.method === 'GET' && !isApi) return Response.redirect(new URL(url.pathname + url.search, home).toString(), 302)
+    return json({ ok: false, error: `The web UI is at ${home}.` }, 404)
+  }
   const who = await accessIdentity(request, env)
   if (!who.ok) {
     console.warn(`ui refused ${url.pathname}: ${who.error}`)
@@ -164,13 +176,12 @@ async function api(request: Request, env: Env, url: URL, email: string): Promise
  * The App Home tab for one person (src/home.ts). `viewerDm` is the DM between them and the bot,
  * from the event, so their own DM threads show and nobody else's.
  */
-export async function publishHome(env: Env, user: string, viewerDm: string | null, origin: string) {
+export async function publishHome(env: Env, user: string, viewerDm: string | null) {
   const [threads, routines] = await Promise.all([recentThreads(env, 40), listRoutines(env, null)])
   const channels = [...threads.map((t) => t.channel), ...routines.map((r) => r.channel)]
   const visible = await visibleChannels(channels, viewerDm, async (id) => isPublicChannel(await channelInfo(env, id)))
   const view = homeView({
-    origin,
-    uiReady: accessConfig(env) !== null,
+    uiOrigin: uiOrigin(env),
     threads: threads.filter((t) => visible.has(t.channel)),
     routines: routines.filter((r) => visible.has(r.channel)),
   })

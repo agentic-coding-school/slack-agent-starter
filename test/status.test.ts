@@ -56,6 +56,13 @@ test('the Stop button carries only the turn id, and leaving it out drops it', ()
   assert.equal(stopping.some((b) => b.type === 'actions'), false)
 })
 
+test('no Follow along link while the web UI is not set up', () => {
+  assert.equal(followUrl(null, 'C1', '100.5'), null)
+  const blocks = statusBlocks({ line: 'l', followUrl: null, turnId: 'turn-1' }) as any[]
+  assert.equal(JSON.stringify(blocks).includes('Follow along'), false)
+  assert.equal(blocks.at(-1).type, 'actions')
+})
+
 const click = {
   type: 'block_actions',
   user: { id: 'U1' },

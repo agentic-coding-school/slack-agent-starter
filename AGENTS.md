@@ -77,8 +77,10 @@ paste a secret into the chat; secrets go in `.env.setup`.
   is dropped by `/slack/events` (`isContextRoot`), or a quoted @mention would start a turn. When
   Slack says the feature is off, the thread gets one note (`noteOnce`, rule 10 in `src/thread.ts`)
   and the command prints `NOT AVAILABLE` so Claude carries on in the thread.
-- The web UI (`/ui`, `src/ui-routes.ts`, rules in `src/ui.ts`, pages in `ui/`) is behind Cloudflare
-  Access, and EVERY `/ui` request (pages, script and API) is checked by `accessIdentity`
+- The web UI (`/ui`, `src/ui-routes.ts`, rules in `src/ui.ts`, pages in `ui/`) lives on its own
+  custom domain, `UI_HOST` (rule 5 in `src/ui.ts`): Access cannot cover only `/ui` on workers.dev,
+  where Slack and GitHub stay. Every UI link uses `uiOrigin(env)`, never the request's origin, and on
+  any other host `/ui` only redirects there. It is behind Cloudflare Access, and EVERY `/ui` request (pages, script and API) is checked by `accessIdentity`
   (`src/access.ts`: RS256 against the team's keys, `iss` from `ACCESS_TEAM_DOMAIN`, `aud` =
   `ACCESS_AUD`, time window) before anything else; unset vars refuse everyone. Never add a password,
   cookie or dev-mode bypass. Writes are same-origin JSON POSTs (`checkWrite`). The pages put data on
