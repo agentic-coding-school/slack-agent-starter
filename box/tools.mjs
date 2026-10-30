@@ -4,6 +4,11 @@
 //   node ~/.agent/tools.mjs upload <file> [--title "Title"] [--comment "A line about it"]
 //   node ~/.agent/tools.mjs canvas <markdown-file> --title "Title"
 //   node ~/.agent/tools.mjs search "<question or words>" [--limit 10]
+//   node ~/.agent/tools.mjs routine create --cron "0 9 * * 1" [--tz Europe/London] [--model sonnet] --prompt "What to do"
+//   node ~/.agent/tools.mjs routine list | pause <id> | resume <id> | delete <id>
+//
+// routine works on THIS channel's routines only: the Worker takes the channel from the token. Each
+// run posts a new thread in the channel and starts a turn there (src/routines.ts).
 //
 // search reads PUBLIC channels only: the Worker asks Slack for public channels and drops anything
 // else before it answers (src/search.ts).
@@ -21,11 +26,51 @@ export const USAGE = [
   '  node ~/.agent/tools.mjs upload <file> [--title "Title"] [--comment "A line about it"]',
   '  node ~/.agent/tools.mjs canvas <markdown-file> --title "Title"',
   '  node ~/.agent/tools.mjs search "<question or words>" [--limit 10]',
+  '  node ~/.agent/tools.mjs routine create --cron "0 9 * * 1" [--tz Europe/London] [--model sonnet] --prompt "What to do"',
+  '  node ~/.agent/tools.mjs routine list',
+  '  node ~/.agent/tools.mjs routine pause|resume|delete <id>',
 ].join('\n')
+
+const ROUTINE_FLAGS = { '--cron': 'cron', '--tz': 'timezone', '--model': 'model', '--prompt': 'prompt' }
+
+/** `routine <action> ...`: the Worker checks the cron, the time zone and the model. */
+function parseRoutine(rest) {
+  const [action, ...args] = rest
+  if (!['create', 'list', 'pause', 'resume', 'delete'].includes(action)) {
+    return { error: action ? `unknown routine action ${action}` : 'routine needs an action: create, list, pause, resume or delete' }
+  }
+  const flags = {}
+  const positional = []
+  for (let i = 0; i < args.length; i++) {
+    const name = ROUTINE_FLAGS[args[i]]
+    if (name) {
+      if (i + 1 >= args.length) return { error: `${args[i]} needs a value` }
+      flags[name] = args[++i]
+    } else if (args[i].startsWith('--')) {
+      return { error: `unknown option ${args[i]}` }
+    } else {
+      positional.push(args[i])
+    }
+  }
+  if (action === 'create') {
+    if (positional.length) return { error: 'routine create takes only --cron, --tz, --model and --prompt; quote each value' }
+    if (!flags.cron) return { error: 'routine create needs --cron, such as "0 9 * * 1" (Mondays 9:00)' }
+    if (!flags.prompt?.trim()) return { error: 'routine create needs --prompt: what to do on each run' }
+    return { command: 'routine', action, ...flags }
+  }
+  if (Object.keys(flags).length) return { error: `routine ${action} takes no options` }
+  if (action === 'list') {
+    if (positional.length) return { error: 'routine list takes nothing else' }
+    return { command: 'routine', action }
+  }
+  if (positional.length !== 1) return { error: `routine ${action} takes one routine id` }
+  return { command: 'routine', action, id: positional[0] }
+}
 
 /** Reads the command line. Returns the command, or `{ error }` with what is wrong. */
 export function parseArgs(argv) {
   const [command, ...rest] = argv
+  if (command === 'routine') return parseRoutine(rest)
   const flags = {}
   const positional = []
   for (let i = 0; i < rest.length; i++) {
@@ -97,6 +142,27 @@ export async function run(cmd, { env = process.env, fetchImpl = fetch } = {}) {
     return formatResults(cmd.query, Array.isArray(out.results) ? out.results : [])
   }
 
+  if (cmd.command === 'routine') {
+    const { command, ...fields } = cmd
+    const res = await fetchImpl(new URL('/sandbox/routines', env.AGENT_API_URL), {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ turnId: env.TURN_ID, ...fields }),
+    })
+    const out = await answer(res)
+    if (cmd.action === 'list') return formatRoutines(Array.isArray(out.routines) ? out.routines : [])
+    if (cmd.action === 'delete') return `Deleted routine ${cmd.id}. It will not run again.`
+    const r = out.routine ?? {}
+    if (cmd.action === 'create') {
+      return [
+        `Made routine ${r.id}: \`${r.cron}\` in ${r.timezone}${r.model ? `, on ${r.model}` : ''}.`,
+        `Next run: ${r.nextRun ?? 'never'}. Each run posts a new thread in this channel.`,
+        `Tell the person the schedule in words and the time zone, and that \`routine pause ${r.id}\` or \`routine delete ${r.id}\` stops it.`,
+      ].join('\n')
+    }
+    return cmd.action === 'pause' ? `Paused routine ${r.id}.` : `Resumed routine ${r.id}. Next run: ${r.nextRun ?? 'never'}.`
+  }
+
   const res = await fetchImpl(new URL('/sandbox/canvas', env.AGENT_API_URL), {
     method: 'POST',
     headers: { ...auth, 'content-type': 'application/json' },
@@ -118,6 +184,20 @@ export function formatResults(query, results) {
   }
   // Every field blank is what a change in Slack's answer looks like, not what "found it" looks like.
   if (results.every((r) => !r.text && !r.ts)) lines.push('WARNING: every result came back empty. Say so rather than treat it as an answer.')
+  return lines.join('\n').trimEnd()
+}
+
+/** A channel's routines as Claude reads them. */
+export function formatRoutines(routines) {
+  if (!routines.length) return 'This channel has no routines.'
+  const lines = [`${routines.length} routine(s) in this channel:`, '']
+  for (const r of routines) {
+    const by = r.createdBy ? ` by <@${r.createdBy}>` : ''
+    const when = r.status === 'paused' ? 'paused' : `next ${r.nextRun ?? 'never'}`
+    lines.push(`${r.id} · \`${r.cron}\` ${r.timezone}${r.model ? ` · ${r.model}` : ''} · ${when}${by}`)
+    const prompt = String(r.prompt ?? '')
+    lines.push(`  ${prompt.length > 200 ? `${prompt.slice(0, 200)}…` : prompt}`, '')
+  }
   return lines.join('\n').trimEnd()
 }
 

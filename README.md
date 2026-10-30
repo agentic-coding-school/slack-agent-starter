@@ -166,6 +166,11 @@ gets a token for the memory repo; see [Memory](#memory).
   Claude. Claude is told their names, never their values. Treat a secret as readable by anyone who
   can talk to the bot in that channel: Claude can print its own environment. They are never set
   from Slack, and the page shows names only.
+- **Routines run on a schedule.** Ask in any thread: "every Monday at 9am, check the open PRs".
+  Claude makes the routine with `node ~/.agent/tools.mjs routine create`, which calls
+  `/sandbox/routines` with its tools token; the Worker stores it in D1 under the token's channel. A
+  Cron Trigger runs every minute and fires each due routine: the bot posts a new thread in that
+  channel and starts a turn there, like a mention. See [Routines](#routines).
 - **It remembers, per channel.** Claude Code's own auto memory writes notes into a folder, and the
   bot keeps that folder in your memory repo, one folder per channel. See [Memory](#memory).
 - **The Slack token never enters the sandbox.** The sandbox gets a token that can post one turn's answer
@@ -177,6 +182,7 @@ gets a token for the memory repo; see [Memory](#memory).
 | `src/index.ts` | The Slack events and interactivity routes, the sandbox doors, the queue consumer |
 | `src/thread.ts` | The thread rules: one turn at a time, dedupe, mid-turn follow-ups, when to pause |
 | `src/thread-state.ts` | The Durable Object that stores a thread and runs its alarm |
+| `src/thread-stub.ts` | Finds a thread's Durable Object by its channel and thread |
 | `src/turn.ts` | Starts one turn: prompt, tokens, launch |
 | `src/sandbox.ts` | E2B / Impello: find, create, pause, launch |
 | `src/github.ts` | GitHub App tokens: the turn's (every repo but memory) and the memory repo's |
@@ -189,13 +195,16 @@ gets a token for the memory repo; see [Memory](#memory).
 | `src/search.ts` | The search rules: public channels only, the request Slack gets, the result shape |
 | `src/channels.ts` | The channel rules: watched channels, the default model, secret names and their encryption |
 | `src/channel-store.ts` | Reads and writes channel settings and encrypted secrets in D1 |
+| `src/routines.ts` | The routine rules: cron in a time zone, the next run, what the sandbox may ask, what a run posts |
+| `src/routine-store.ts` | Routines and their runs in D1, scoped to a channel, and the claim that fires a run once |
+| `src/routine-fire.ts` | The every-minute sweep: posts each due run's thread and starts its turn |
 | `src/db.ts` | The D1 database helpers |
 | `migrations/` | The D1 tables. `npm run setup` applies them |
 | `box/run-turn.mjs` | Runs inside the sandbox: runs Claude, reports progress, posts the answer back |
 | `box/progress.mjs` | Runs inside the sandbox: turns Claude's stream events into the status line |
 | `box/memory.mjs` | Runs inside the sandbox: pulls the channel's notes before Claude starts and pushes what changed |
 | `box/files.mjs` | Runs inside the sandbox: downloads the turn's files before Claude starts |
-| `box/tools.mjs` | Runs inside the sandbox: Claude's commands to post a file or a canvas into its thread, and to search public channels |
+| `box/tools.mjs` | Runs inside the sandbox: Claude's commands to post a file or a canvas into its thread, to search public channels, and to make and change routines |
 | `box/inbox.mjs`, `box/inbox-hook.mjs` | Runs inside the sandbox: follow-ups sent mid-turn, and the hook that hands them to Claude |
 | `box/CLAUDE.md` | The instructions Claude reads in the sandbox. Edit this to change the bot's behavior. |
 | `template/Dockerfile` | The sandbox image. Run `npm run template:build` after you change it. |
@@ -234,6 +243,30 @@ my-bot-memory/
   revert a commit. Do look now and then. Anyone who can talk to the bot can teach it something, and
   a note **outlives the thread**: it is read by every later thread in that channel.
 
+## Routines
+
+Anyone who can talk to the bot can give it a schedule: "every weekday at 9am, summarise yesterday's
+open PRs in this channel". Claude turns that into a cron and a self-contained prompt, and saves the
+routine. It can also list this channel's routines, and pause, resume or delete one.
+
+- **Each run is a new thread** in the channel the routine was made in, with a fresh sandbox. It
+  starts with the channel's memory notes and nothing else from the thread that made it.
+- **Times are in a time zone.** Without one, the person's own Slack time zone is used, so "9am"
+  means their 9am, through daylight saving changes too.
+- **A channel sees only its own routines.** The Worker takes the channel from the sandbox's token.
+  A private channel's routines never show up in another channel.
+- **The model** is the routine's own if it was given one, else the channel's default.
+- **A run fires once.** The every-minute sweep claims each run with a row D1 will not insert twice,
+  so overlapping sweeps never double it. If the Worker misses some minutes, a routine fires once
+  when it is back, not once per missed run. A run that cannot post (say the bot was removed from
+  the channel) is recorded as failed and the routine keeps its schedule.
+
+**There are no limits** on how many routines there are or how often they run: every minute is
+allowed. Each run is a whole Claude turn in a sandbox, so a routine that runs every few minutes can
+cost real money on an API key, and a lot of them can use up a plan's limits. Check
+`routine list` in each channel now and then. **A routine outlives its thread**, like memory: anyone
+in the workspace can make one, and it keeps running until someone pauses or deletes it.
+
 ## Transcript backups
 
 Every turn's transcript is copied to the R2 bucket `slack-agent-transcripts` and **never deleted**:
@@ -261,6 +294,9 @@ In `wrangler.jsonc` under `vars`. Run `npm run deploy` after you change one.
   A turn that never reports back is released after its limit, with a note in the thread.
 - **Stop does nothing:** check that Interactivity is on in the Slack app with the Request URL
   `<worker>/slack/interactive`. A click is seen by the sandbox on its next report (up to 10 seconds).
+- **A routine did not run:** `routine list` in its channel shows whether it is paused and when it
+  runs next. A run that could not post (the bot is not in the channel) is recorded as failed in
+  D1's `routine_runs` table, with Slack's error. `npx wrangler tail` shows the sweep each minute.
 - **"Invalid API key" from Claude:** the Claude secret is wrong or expired. Run
   `npx wrangler secret put CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) again.
 

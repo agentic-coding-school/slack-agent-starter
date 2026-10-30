@@ -39,3 +39,9 @@ export async function recordTranscript(env: Pick<Env, 'DB'>, row: TranscriptRow)
     row.created_at,
   )
 }
+
+/** Runs a write and returns how many rows it changed. A claim is "did my insert land?". */
+export async function dbChanges(env: Pick<Env, 'DB'>, sql: string, ...params: unknown[]): Promise<number> {
+  const result = await env.DB.prepare(sql).bind(...params).run()
+  return result.meta?.changes ?? 0
+}

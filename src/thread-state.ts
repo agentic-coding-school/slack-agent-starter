@@ -5,6 +5,8 @@ import { deleteMessage, postInThread } from './slack.ts'
 import {
   abortStart,
   accept,
+  acceptRoutineRun,
+  authorView,
   afterPause,
   applyModelCommand,
   emptyThread,
@@ -27,7 +29,7 @@ import {
   type ThreadData,
   type Turn,
 } from './thread.ts'
-import type { ModelCommand } from './models.ts'
+import type { ModelAlias, ModelCommand } from './models.ts'
 import { enqueueTurn } from './turn.ts'
 
 /** How soon the alarm retries a turn whose job could not be queued. */
@@ -49,6 +51,23 @@ export class ThreadState extends DurableObject<Env> {
     const data = await this.load(channel, threadTs, origin)
     data.origin = origin
     const result = accept(data, msg, { mention, channelModel, ...this.clock() })
+    if (result.action !== 'skip') await this.save(data)
+    if (result.action === 'start') await this.armAlarm(data)
+    return result
+  }
+
+  /** A routine's run: the first message of a thread the bot just posted (src/routine-fire.ts). */
+  async acceptRoutineRun(
+    channel: string,
+    threadTs: string,
+    origin: string,
+    msg: SlackMessage,
+    model: ModelAlias | null,
+    channelModel?: ChannelModel,
+  ): Promise<AcceptResult> {
+    const data = await this.load(channel, threadTs, origin)
+    data.origin = origin
+    const result = acceptRoutineRun(data, msg, { model, channelModel, ...this.clock() })
     if (result.action !== 'skip') await this.save(data)
     if (result.action === 'start') await this.armAlarm(data)
     return result
@@ -126,6 +145,11 @@ export class ThreadState extends DurableObject<Env> {
   /** Read-only: the running turn's search permission, for the search door (rule 8). */
   async searchView(turnId: string) {
     return searchView(await this.ctx.storage.get<ThreadData>('thread'), turnId)
+  }
+
+  /** Read-only: whether the turn runs, and who asked for it, for the routines door. */
+  async authorView(turnId: string) {
+    return authorView(await this.ctx.storage.get<ThreadData>('thread'), turnId)
   }
 
   async alarm() {
@@ -215,6 +239,4 @@ export class ThreadState extends DurableObject<Env> {
   }
 }
 
-export function threadStub(env: Env, channel: string, threadTs: string) {
-  return env.THREADS.get(env.THREADS.idFromName(`${channel}:${threadTs}`))
-}
+export { threadStub } from './thread-stub.ts'

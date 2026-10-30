@@ -7,8 +7,11 @@ import { canvasLinkText, checkCanvas, checkUpload, downloadHeaders, filesFromEve
 import { checkPush, MAX_TOTAL_BYTES } from './memory.ts'
 import { pullMemory, pushMemory } from './memory-store.ts'
 import { parseModelCommand } from './models.ts'
+import { sweepRoutines } from './routine-fire.ts'
+import { createRoutine, deleteRoutine, listRoutines, setRoutineStatus } from './routine-store.ts'
+import { checkRoutineAction, checkTimezone, routineView } from './routines.ts'
 import { checkSearch, normalise, publicOnly, resultsOf, searchArgs, searchErrorHint } from './search.ts'
-import { channelInfo, createCanvas, deleteMessage, fileInfo, postInThread, postMessage, react, slackApi, updateMessage, uploadToThread, verifySlackSignature } from './slack.ts'
+import { channelInfo, createCanvas, deleteMessage, fileInfo, postInThread, postMessage, react, slackApi, updateMessage, uploadToThread, userTimezone, verifySlackSignature } from './slack.ts'
 import { followUrl, parseStopClick, statusBlocks, statusLine } from './status.ts'
 import { threadStub } from './thread-state.ts'
 import { checkTranscriptSize, transcriptKey } from './transcripts.ts'
@@ -31,7 +34,10 @@ export { ThreadState } from './thread-state.ts'
  *   POST /sandbox/upload    Claude posting a file into its own thread, with the turn's tools token.
  *   POST /sandbox/canvas    Claude posting a canvas into its own thread, same tools token.
  *   POST /sandbox/search    Claude searching the workspace's PUBLIC channels, same tools token.
+ *   POST /sandbox/routines  Claude making, listing, pausing or deleting its CHANNEL's routines, same
+ *                           tools token (src/routines.ts).
  *   queue                   Starts a turn in a sandbox (src/turn.ts).
+ *   scheduled               The Cron Trigger, every minute: fires due routines (src/routine-fire.ts).
  *
  * Plus the thread's alarm (src/thread-state.ts), which pauses quiet sandboxes.
  */
@@ -49,6 +55,7 @@ export default {
     if (request.method === 'POST' && url.pathname === '/sandbox/upload') return sandboxUpload(request, env)
     if (request.method === 'POST' && url.pathname === '/sandbox/canvas') return sandboxCanvas(request, env)
     if (request.method === 'POST' && url.pathname === '/sandbox/search') return sandboxSearch(request, env)
+    if (request.method === 'POST' && url.pathname === '/sandbox/routines') return sandboxRoutines(request, env)
     if (url.pathname === '/') return new Response('slack-agent is running. Point Slack at /slack/events.\n')
     return new Response('not found', { status: 404 })
   },
@@ -63,6 +70,10 @@ export default {
         message.retry({ delaySeconds: 5 * message.attempts })
       }
     }
+  },
+
+  async scheduled(_controller: ScheduledController, env: Env) {
+    await sweepRoutines(env)
   },
 } satisfies ExportedHandler<Env, TurnJob>
 
@@ -419,6 +430,57 @@ async function sandboxSearch(request: Request, env: Env) {
   const { hits, dropped } = await publicOnly(resultsOf(json).map(normalise), (id) => channelInfo(env, id))
   if (dropped) console.warn(`turn ${turnId}: search dropped ${dropped} result(s) not from a public channel`)
   return Response.json({ ok: true, results: hits })
+}
+
+/**
+ * Routines for Claude (box/tools.mjs routine). The channel comes from the token, so a thread can
+ * only make, list, pause or delete its own channel's routines (src/routines.ts rule 1); the creator
+ * is whoever sent the running turn's newest message, from the thread's own records.
+ */
+async function sandboxRoutines(request: Request, env: Env) {
+  const body = (await request.json().catch(() => null)) as { turnId?: string } | null
+  const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
+  const verified = await verifyCallbackToken(env.CALLBACK_SECRET, token, body?.turnId ?? '', Date.now(), 'tools')
+  if (!verified.ok) return Response.json({ ok: false, error: verified.reason }, { status: 401 })
+
+  const checked = checkRoutineAction(body)
+  if (!checked.ok) return Response.json({ ok: false, error: checked.error }, { status: 400 })
+
+  const { channel, threadTs, turnId } = verified.claims
+  const view = await threadStub(env, channel, threadTs).authorView(turnId)
+  if (!view.running) return Response.json({ ok: false, error: 'this turn is over' }, { status: 409 })
+
+  const action = checked.value
+  if (action.action === 'list') return Response.json({ ok: true, routines: await listRoutines(env, channel) })
+  if (action.action === 'create') {
+    // No time zone given: the person's own Slack time zone, so "9am" means their 9am.
+    let timezone = action.timezone
+    if (!timezone && view.author) {
+      const tz = checkTimezone(await userTimezone(env, view.author))
+      if (tz.ok) timezone = tz.value
+    }
+    const routine = await createRoutine(env, {
+      channel,
+      prompt: action.prompt,
+      cron: action.cron,
+      timezone: timezone ?? 'UTC',
+      model: action.model ?? null,
+      origin: url(request),
+      createdBy: view.author ?? null,
+      createdThreadTs: threadTs,
+    })
+    console.log(`turn ${turnId} made routine ${routine.id} in ${channel}`)
+    return Response.json({ ok: true, routine: routineView(routine) })
+  }
+  if (action.action === 'delete') {
+    const deleted = await deleteRoutine(env, channel, action.id)
+    if (!deleted) return Response.json({ ok: false, error: `no routine ${action.id} in this channel` }, { status: 404 })
+    console.log(`turn ${turnId} deleted routine ${action.id}`)
+    return Response.json({ ok: true })
+  }
+  const routine = await setRoutineStatus(env, channel, action.id, action.action === 'pause' ? 'paused' : 'active')
+  if (!routine) return Response.json({ ok: false, error: `no routine ${action.id} in this channel` }, { status: 404 })
+  return Response.json({ ok: true, routine })
 }
 
 /**

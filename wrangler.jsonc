@@ -33,6 +33,10 @@
   // bucket has no lifecycle rule. `npm run setup` creates it.
   "r2_buckets": [{ "binding": "TRANSCRIPTS", "bucket_name": "slack-agent-transcripts" }],
 
+  // Routines (src/routines.ts): every minute the Worker fires the routines that are due. Created by
+  // the deploy, which `npm run setup` runs. Minute precision is what lets a routine run that often.
+  "triggers": { "crons": ["* * * * *"] },
+
   // The script the sandbox runs for each turn, and the instructions Claude reads there.
   "rules": [{ "type": "Text", "globs": ["**/box/*.md", "**/box/*.mjs"], "fallthrough": true }],
 

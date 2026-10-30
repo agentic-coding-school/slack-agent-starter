@@ -17,10 +17,10 @@ paste a secret into the chat; secrets go in `.env.setup`.
 - D1 tables are made by numbered SQL files in `migrations/`; add a new file, never edit an applied
   one. `npm run setup` applies them. Query through `src/db.ts`, always with bound `?` values.
 - Every sandbox-to-Worker door (`/sandbox/callback`, `/sandbox/transcript`, `/sandbox/progress`,
-  `/sandbox/memory`, `/sandbox/upload`, `/sandbox/canvas`, `/sandbox/search`, `/sandbox/file`) checks a signed token and builds every key,
+  `/sandbox/memory`, `/sandbox/upload`, `/sandbox/canvas`, `/sandbox/search`, `/sandbox/routines`, `/sandbox/file`) checks a signed token and builds every key,
   channel and thread from the token's claims, never from the request body. Each token purpose signs
   with its own key (`src/callback-token.ts`): `reply` (the runner only; Claude never sees it),
-  `tools` (Claude's, for upload, canvas and search), `file` (one grant per Slack file, `src/files.ts`). Text a sandbox sends for Slack is capped and escaped (`src/status.ts`).
+  `tools` (Claude's, for upload, canvas, search and routines), `file` (one grant per Slack file, `src/files.ts`). Text a sandbox sends for Slack is capped and escaped (`src/status.ts`).
 - Slack's own routes (`/slack/events`, `/slack/interactive`) check the signing secret before reading
   the body. The Stop button only marks the turn (rule 6 in `src/thread.ts`); the sandbox ends it.
 - Never put the Slack bot token, the signing secret or `CALLBACK_SECRET` into a sandbox
@@ -47,3 +47,11 @@ paste a secret into the chat; secrets go in `.env.setup`.
   gets a token that reaches it (`mintTurnToken` in `src/github.ts` leaves it out). Keep both, or one
   channel could read another's, private ones included. The GitHub App and `MEMORY_REPO` are required
   (`githubMissing`). Do not add a memory skill or recall tool: auto memory already loads the index.
+- Routines (`src/routines.ts` rules, `src/routine-store.ts` D1, `src/routine-fire.ts` the sweep,
+  `box/tools.mjs routine`): the routine's channel comes from the tools token and every sandbox query
+  is scoped to it, so a thread only sees its own channel's routines. The Cron Trigger
+  (`triggers.crons` in `wrangler.jsonc`, every minute) claims a run by inserting its
+  (routine, due time) row, which the unique key lets through once; it then moves the routine on
+  whether or not it won, so a dead sweep never leaves one stuck. Each run posts a new root message
+  and starts its turn through the thread's Durable Object (`acceptRoutineRun` in `src/thread.ts`).
+  No limits on count or frequency, by decision; do not add any.

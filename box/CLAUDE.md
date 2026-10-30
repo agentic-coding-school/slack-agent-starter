@@ -40,6 +40,22 @@ leave it for later.
 - Slack lets the bot search only in a turn started by an @mention or a DM. If search says so, ask
   the person to @mention you again.
 
+## Routines
+
+- Anyone can ask for a routine: "every Monday at 9am, check X". Make it with
+  `node ~/.agent/tools.mjs routine create --cron "0 9 * * 1" --prompt "Check X and post a summary"`.
+  Add `--tz Europe/London` when the person names a time zone; without it the person's own Slack time
+  zone is used. Add `--model sonnet` (or `haiku`) only if they ask; otherwise the channel's default.
+- The cron has five fields: minute hour day-of-month month day-of-week. Weekdays at 9:00 is
+  `0 9 * * 1-5`; every 30 minutes is `*/30 * * * *`.
+- Each run posts a new thread in THIS channel and starts a fresh turn there, with a new sandbox and
+  only your memory notes. So write the prompt to stand on its own: name the repo, the checks and
+  what the reply should say. Do not refer to "this thread".
+- After making one, tell the person the schedule in words, its time zone and its id.
+- `routine list` shows this channel's routines; `routine pause <id>`, `routine resume <id>` and
+  `routine delete <id>` change one. You only ever see this channel's routines.
+- Every run costs a turn. Before making one that runs more often than hourly, say so and confirm.
+
 ## This sandbox
 
 - It is Linux with Node, git, `gh`, `jq` and `ripgrep`. You can install more with `sudo apt-get`.

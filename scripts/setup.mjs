@@ -178,6 +178,7 @@ if (!migrate.ok) {
 }
 console.log(`  D1 database ${DATABASE} ready, migrations applied`)
 
+// The deploy also sets the Cron Trigger in wrangler.jsonc (routines, every minute); a redeploy keeps it.
 const deploy = wrangler(['deploy'], { capture: true })
 if (!deploy.ok) {
   console.error(deploy.out)

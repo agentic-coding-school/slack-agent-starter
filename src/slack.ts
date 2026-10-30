@@ -172,3 +172,15 @@ export async function channelInfo(env: Env, channelId: string): Promise<Record<s
   const json = await slackApi(env, 'conversations.info', { channel: channelId }).catch(() => null)
   return (json?.channel as Record<string, unknown> | undefined) ?? null
 }
+
+/** A person's Slack time zone (users.info, scope users:read), or null when Slack will not say. */
+export async function userTimezone(env: Env, user: string): Promise<string | null> {
+  try {
+    const json = await slackApi(env, 'users.info', { user })
+    const tz = (json.user as { tz?: unknown } | undefined)?.tz
+    return typeof tz === 'string' && tz ? tz : null
+  } catch (err) {
+    console.warn(`could not read ${user}'s time zone:`, (err as Error).message)
+    return null
+  }
+}

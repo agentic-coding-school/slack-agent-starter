@@ -102,6 +102,8 @@ export interface RunningTurn {
   inbox?: SlackMessage[]
   /** The newest search permission among the turn's messages and follow-ups (rule 8). */
   actionToken?: string
+  /** Who sent the turn's newest message: a routine made in this turn is theirs (src/routines.ts). */
+  author?: string
 }
 
 /** How many message ids to remember for dedupe. Slack retries within minutes, not days. */
@@ -337,6 +339,26 @@ export function searchView(data: ThreadData | undefined, turnId: string): { runn
   return actionToken ? { running: true, actionToken } : { running: true }
 }
 
+/** Read-only: is the turn still running, and who asked for it (src/routines.ts rule 1). */
+export function authorView(data: ThreadData | undefined, turnId: string): { running: false } | { running: true; author?: string } {
+  if (data?.running?.turnId !== turnId) return { running: false }
+  const { author } = data.running
+  return author ? { running: true, author } : { running: true }
+}
+
+/**
+ * A routine's run (src/routines.ts rule 2): the bot posted a new root message and this is its
+ * thread. It starts like a mention, on the routine's model if it has one, else the channel's.
+ */
+export function acceptRoutineRun(
+  data: ThreadData,
+  msg: SlackMessage,
+  opts: Clock & { model?: ModelAlias | null; channelModel?: ChannelModel },
+): AcceptResult {
+  if (opts.model && !data.known) data.model = opts.model
+  return accept(data, msg, { ...opts, mention: true })
+}
+
 export type AlarmResult =
   | { action: 'none' }
   | { action: 'wait'; until: number }
@@ -395,7 +417,8 @@ function begin(data: ThreadData, messages: SlackMessage[], firstTurn: boolean, o
   const turnId = opts.newTurnId()
   const model = threadModel(data)
   const actionToken = messages.findLast((m) => m.actionToken)?.actionToken
-  data.running = { turnId, startedAt: opts.now, model, ...(actionToken ? { actionToken } : {}) }
+  const author = messages.at(-1)?.user
+  data.running = { turnId, startedAt: opts.now, model, ...(actionToken ? { actionToken } : {}), ...(author ? { author } : {}) }
   data.parked = false
   return { turnId, messages, firstTurn, startedAt: opts.now, model }
 }
