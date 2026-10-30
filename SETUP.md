@@ -77,7 +77,9 @@ The bot keeps its memory in a private GitHub repo, so this step is not optional:
 start until it is done. Walk the human through "GitHub App" in the README:
 
 1. They create a **private** repo for the memory (for example `my-bot-memory`) **with a README**.
-2. They create the GitHub App and install it on the memory repo and on any repos the bot may work in.
+2. They create the GitHub App with the permissions in README "GitHub App" step 3 (Contents and Pull
+   requests: Read and write; Checks, Commit statuses and Actions: Read-only) and install it on the
+   memory repo and on any repos the bot may work in.
 3. They fill in `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH` (the path to the downloaded `.pem`
    file) and `MEMORY_REPO` (`owner/name`, not a secret; you may write it yourself) in `.env.setup`.
 4. The App's webhook stays **Active**: Webhook URL `<worker>/github/webhook` (setup printed the

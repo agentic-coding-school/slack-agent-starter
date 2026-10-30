@@ -92,7 +92,8 @@ same App lets it clone your repos, push a branch and open a pull request.
    **Webhook URL** to `<your Worker URL>/github/webhook`, and the **Webhook secret** to a long random
    string you make (`openssl rand -hex 32`). The same string goes into `GITHUB_WEBHOOK_SECRET`.
 3. Repository permissions: **Contents: Read and write**, **Pull requests: Read and write**,
-   **Checks: Read-only**, **Commit statuses: Read-only**. Metadata (read) is added for you.
+   **Checks: Read-only**, **Commit statuses: Read-only**, **Actions: Read-only** (so the bot can see
+   why CI failed on its PR and read the failed job's log). Metadata (read) is added for you.
    Under **Subscribe to events**, tick **Check run**, **Status**, **Pull request**,
    **Pull request review**, **Pull request review comment** and **Issue comment**.
 4. "Where can this GitHub App be installed?": **Only on this account**. Click **Create**.
@@ -103,7 +104,9 @@ same App lets it clone your repos, push a branch and open a pull request.
    (`owner/name`, which goes into `MEMORY_REPO` in `wrangler.jsonc`) and the webhook secret.
 
 Made the App before this step existed? Open it (Developer settings > GitHub Apps > Edit), do steps
-2 and 3, and accept the new permissions on the install page (GitHub emails you a link).
+2 and 3 (including Checks, Commit statuses and Actions: Read-only), and accept the new permissions on
+the install page (GitHub emails you a link). Until you accept them, the bot still opens PRs but
+cannot see why CI failed.
 
 **Protect your main branch.** In each repo: Settings > Rules > Rulesets > New branch ruleset,
 target `main`, and tick **Require a pull request before merging**. The bot is told never to push to

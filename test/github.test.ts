@@ -2,7 +2,8 @@
 import assert from 'node:assert/strict'
 import { createPublicKey, generateKeyPairSync, verify } from 'node:crypto'
 import { test } from 'node:test'
-import { appJwt, githubMissing, mintInstallationToken, mintTurnToken, parseRepo, TOKEN_PERMISSIONS, withoutRepo } from '../src/github.ts'
+import { appJwt, githubMissing, mintInstallationToken, mintTurnToken, parseRepo, PR_PERMISSIONS, TOKEN_PERMISSIONS, withoutRepo } from '../src/github.ts'
+import { wakePrompt } from '../src/pr-follow.ts'
 
 // GitHub hands out PKCS#1 keys; the code must accept that format as-is.
 const { privateKey, publicKey } = generateKeyPairSync('rsa', {
@@ -35,7 +36,66 @@ test('mints an installation token asking only for PR permissions', async () => {
   assert.equal(await mintInstallationToken(env, fakeFetch), 'ghs_test')
   assert.equal(calls[1].url, 'https://api.github.com/app/installations/77/access_tokens')
   assert.deepEqual(JSON.parse(calls[1].body!), { permissions: TOKEN_PERMISSIONS })
-  assert.deepEqual(TOKEN_PERMISSIONS, { contents: 'write', pull_requests: 'write', metadata: 'read' })
+  assert.deepEqual(TOKEN_PERMISSIONS, {
+    contents: 'write',
+    pull_requests: 'write',
+    metadata: 'read',
+    checks: 'read',
+    statuses: 'read',
+    actions: 'read',
+  })
+})
+
+test('the turn token can run what a CI-failed wake tells Claude to run', () => {
+  const prompt = wakePrompt(
+    { repo: 'me/app', number: 4, url: 'https://github.com/me/app/pull/4', title: 'Fix' } as never,
+    ['CI failed: test'],
+    1,
+  )
+  // `gh pr checks` reads the status-check rollup: check runs AND commit statuses.
+  assert.match(prompt, /gh pr checks 4 --repo me\/app/)
+  assert.equal(TOKEN_PERMISSIONS.checks, 'read')
+  assert.equal(TOKEN_PERMISSIONS.statuses, 'read')
+  // "Find out why" means the failed job's log: `gh run view --log-failed` needs Actions read.
+  assert.match(prompt, /gh run view <run-id> --log-failed --repo me\/app/)
+  assert.equal(TOKEN_PERMISSIONS.actions, 'read')
+})
+
+test('an App without the CI read permissions still gets a PR-only turn token', async () => {
+  const minted: Array<Record<string, unknown>> = []
+  const fakeFetch = (async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/access_tokens')) {
+      const body = JSON.parse(init!.body as string)
+      minted.push(body)
+      if (body.permissions?.checks) return new Response('{"message":"The permissions requested are not granted to this installation."}', { status: 422 })
+      return Response.json({ token: `ghs_${minted.length}` })
+    }
+    if (url.includes('/installation/repositories')) return Response.json({ repositories: [{ id: 10, full_name: 'me/app' }] })
+    throw new Error(url)
+  }) as typeof fetch
+  const env = { GITHUB_APP_ID: '1', GITHUB_APP_PRIVATE_KEY: privateKey, GITHUB_INSTALLATION_ID: '7', MEMORY_REPO: 'me/bot-memory' } as never
+  const warn = console.warn
+  console.warn = () => {}
+  try {
+    assert.equal(await mintTurnToken(env, fakeFetch), 'ghs_3')
+  } finally {
+    console.warn = warn
+  }
+  assert.deepEqual(minted.slice(1), [
+    { permissions: TOKEN_PERMISSIONS, repository_ids: [10] },
+    { permissions: PR_PERMISSIONS, repository_ids: [10] },
+  ])
+})
+
+test('a turn token failure that is not a permissions refusal is not retried', async () => {
+  let mints = 0
+  const fakeFetch = (async (url: string) => {
+    if (url.endsWith('/access_tokens')) return ++mints === 1 ? Response.json({ token: 'ghs_l' }) : new Response('down', { status: 500 })
+    return Response.json({ repositories: [{ id: 10, full_name: 'me/app' }] })
+  }) as unknown as typeof fetch
+  const env = { GITHUB_APP_ID: '1', GITHUB_APP_PRIVATE_KEY: privateKey, GITHUB_INSTALLATION_ID: '7', MEMORY_REPO: 'me/bot-memory' } as never
+  await assert.rejects(mintTurnToken(env, fakeFetch), /500/)
+  assert.equal(mints, 2)
 })
 
 test('refuses to guess between several installations', async () => {

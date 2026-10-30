@@ -271,7 +271,8 @@ export function wakePrompt(f: FollowedPr, lines: string[], wakeNumber: number): 
     ...lines.map((l) => `- ${l}`),
     '</github-events>',
     `Look before you act: \`gh pr checks ${f.number} --repo ${f.repo}\`, \`gh pr view ${f.number} --repo ${f.repo} --comments\`.`,
-    'If a check failed, find out why and push a fix to the PR\'s branch. If a person asked for a change that makes sense, make it;',
+    `If a check failed, find out why (\`gh run view <run-id> --log-failed --repo ${f.repo}\` shows the failed job's log) and push a fix to the PR's branch.`,
+    'If a person asked for a change that makes sense, make it;',
     'if not, or if you are unsure, say why in your reply. Your reply is posted in this thread: keep it short.',
   ].join('\n')
 }

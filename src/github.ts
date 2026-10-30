@@ -29,8 +29,15 @@ export function parseRepo(value: string | undefined): { owner: string; name: str
   return m && m[2] !== '.' && m[2] !== '..' ? { owner: m[1], name: m[2] } : null
 }
 
-/** Only what opening a PR needs. A token can never hold more than the App was granted. */
-export const TOKEN_PERMISSIONS = { contents: 'write', pull_requests: 'write', metadata: 'read' } as const
+/** What opening a PR needs. A token can never hold more than the App was granted. */
+export const PR_PERMISSIONS = { contents: 'write', pull_requests: 'write', metadata: 'read' } as const
+
+/**
+ * The turn's token: opening a PR, plus reading why CI failed on it. A CI-failed wake (src/pr-follow.ts
+ * wakePrompt) runs `gh pr checks` (checks + commit statuses) and `gh run view --log-failed` (actions).
+ * All three must also be granted on the App (README "GitHub App" step 3).
+ */
+export const TOKEN_PERMISSIONS = { ...PR_PERMISSIONS, checks: 'read', statuses: 'read', actions: 'read' } as const
 
 /** The Worker's own token for the memory repo: that one repo, its files and nothing else. */
 export const MEMORY_PERMISSIONS = { contents: 'write', metadata: 'read' } as const
@@ -79,8 +86,16 @@ export async function mintInstallationToken(env: Env, fetchImpl: typeof fetch = 
       ...(scope.repositoryIds ? { repository_ids: scope.repositoryIds } : {}),
     }),
   })
-  if (!res.ok) throw new Error(`github access token: ${res.status} ${await res.text()}`)
+  if (!res.ok) throw new GithubTokenError(res.status, `github access token: ${res.status} ${await res.text()}`)
   return ((await res.json()) as { token: string }).token
+}
+
+export class GithubTokenError extends Error {
+  readonly status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.status = status
+  }
 }
 
 /** GitHub takes at most this many repos in one scoped token. */
@@ -98,7 +113,16 @@ export async function mintTurnToken(env: Env, fetchImpl: typeof fetch = fetch): 
   const lister = await mintInstallationToken(env, fetchImpl, { permissions: { metadata: 'read' } })
   const ids = withoutRepo(await listInstallationRepos(lister, fetchImpl), memory)
   if (!ids.length) return null
-  return mintInstallationToken(env, fetchImpl, { repositoryIds: ids.slice(0, MAX_SCOPED_REPOS) })
+  const repositoryIds = ids.slice(0, MAX_SCOPED_REPOS)
+  try {
+    return await mintInstallationToken(env, fetchImpl, { repositoryIds })
+  } catch (err) {
+    // GitHub refuses (422) a token asking for a permission the install has not accepted: an App made
+    // before CI reading existed. Fall back to PR access, so the turn still works, and say what to do.
+    if (!(err instanceof GithubTokenError) || err.status !== 422) throw err
+    console.warn('github turn token: CI read permissions not granted, falling back to PR access. Add Checks, Commit statuses and Actions (Read-only) to the App (README "GitHub App" step 3).')
+    return mintInstallationToken(env, fetchImpl, { repositoryIds, permissions: PR_PERMISSIONS })
+  }
 }
 
 export interface InstalledRepo {
