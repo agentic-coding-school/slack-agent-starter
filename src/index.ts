@@ -21,6 +21,8 @@ import { channelInfo, createCanvas, deleteMessage, fileInfo, postInChannel, post
 import { followUrl, parseStopClick, statusBlocks, statusLine } from './status.ts'
 import { threadStub } from './thread-state.ts'
 import { checkTranscriptSize, transcriptKey } from './transcripts.ts'
+import { checkLiveEntries } from './live.ts'
+import { publishHome, uiRoute } from './ui-routes.ts'
 import { DONE_EMOJI, FAILED_EMOJI, MIDTURN_EMOJI, QUEUED_EMOJI, runTurnJob, STOPPED_EMOJI, WORKING_EMOJI, type TurnJob } from './turn.ts'
 
 export { ThreadState } from './thread-state.ts'
@@ -48,6 +50,8 @@ export { ThreadState } from './thread-state.ts'
  *                           token: create, post, view, status, archive, summary (src/code-channels.ts).
  *   POST /github/webhook    GitHub App events, signed with GITHUB_WEBHOOK_SECRET: CI failures,
  *                           reviews and comments on a followed PR, and its merge or close.
+ *   GET|POST /ui/*          The web UI and its API, behind Cloudflare Access: transcripts (R2 backups
+ *                           and the live turn), routines, channel settings (src/ui-routes.ts).
  *   queue                   Starts a turn in a sandbox (src/turn.ts).
  *   scheduled               The Cron Trigger, every minute: fires due routines (src/routine-fire.ts)
  *                           and wakes the threads of followed PRs (src/pr-follow-fire.ts).
@@ -72,6 +76,7 @@ export default {
     if (request.method === 'POST' && url.pathname === '/sandbox/follow-pr') return sandboxFollowPr(request, env)
     if (request.method === 'POST' && url.pathname === '/sandbox/code-channel') return sandboxCodeChannel(request, env)
     if (request.method === 'POST' && url.pathname === '/github/webhook') return githubWebhook(request, env)
+    if (url.pathname === '/ui' || url.pathname.startsWith('/ui/')) return uiRoute(request, env)
     if (url.pathname === '/') return new Response('slack-agent is running. Point Slack at /slack/events.\n')
     return new Response('not found', { status: 404 })
   },
@@ -111,6 +116,8 @@ interface SlackEvent {
   /** Slack's search permission, on an @mention or a DM (src/search.ts). */
   action_token?: string
   blocks?: unknown[]
+  /** On app_home_opened: which tab was opened. */
+  tab?: string
 }
 
 async function slackEvents(request: Request, env: Env, ctx: ExecutionContext) {
@@ -130,6 +137,14 @@ async function slackEvents(request: Request, env: Env, ctx: ExecutionContext) {
   const event = body.event as SlackEvent
   const botUserId: string | undefined = body.authorizations?.[0]?.user_id
   const origin = url(request)
+
+  // The App Home tab (src/home.ts), drawn fresh each time someone opens it.
+  if (event.type === 'app_home_opened') {
+    if (event.tab === 'home' && event.user) {
+      ctx.waitUntil(publishHome(env, event.user, event.channel ?? null, origin).catch((err) => console.error('could not publish the App Home:', err)))
+    }
+    return new Response('ok')
+  }
 
   // Ignore bots (ourselves included), edits, deletes, joins and the like. A message with a file, or
   // a reply also sent to the channel, is still a message from a person. Its files reach Claude when
@@ -262,9 +277,14 @@ async function sandboxProgress(request: Request, env: Env) {
   if (!verified.ok) return Response.json({ ok: false, error: verified.reason }, { status: 401 })
 
   const { channel, threadTs, turnId } = verified.claims
-  const view = await threadStub(env, channel, threadTs).progress(turnId)
+  const thread = threadStub(env, channel, threadTs)
+  const view = await thread.progress(turnId)
   // The thread is done with this turn (finished, or given up on): nothing to show, so stop.
   if (!view.running) return Response.json({ ok: true, stop: true })
+  // What Claude did since the last report, for the live transcript page (src/live.ts). Kept only
+  // for the turn running in the token's thread; a failure costs the page a few lines, never the turn.
+  const entries = checkLiveEntries((body as { events?: unknown }).events, Date.now())
+  if (entries.length) await thread.appendLive(turnId, entries).catch((err) => console.warn(`turn ${turnId}: could not keep live entries:`, err.message))
   // Stopping: leave the "Stopping…" line alone and tell the sandbox.
   if (view.stop) return Response.json({ ok: true, stop: true })
   // Follow-ups for this turn (rule 7 in src/thread.ts). They come from this thread's own records,

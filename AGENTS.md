@@ -77,3 +77,16 @@ paste a secret into the chat; secrets go in `.env.setup`.
   is dropped by `/slack/events` (`isContextRoot`), or a quoted @mention would start a turn. When
   Slack says the feature is off, the thread gets one note (`noteOnce`, rule 10 in `src/thread.ts`)
   and the command prints `NOT AVAILABLE` so Claude carries on in the thread.
+- The web UI (`/ui`, `src/ui-routes.ts`, rules in `src/ui.ts`, pages in `ui/`) is behind Cloudflare
+  Access, and EVERY `/ui` request (pages, script and API) is checked by `accessIdentity`
+  (`src/access.ts`: RS256 against the team's keys, `iss` from `ACCESS_TEAM_DOMAIN`, `aud` =
+  `ACCESS_AUD`, time window) before anything else; unset vars refuse everyone. Never add a password,
+  cookie or dev-mode bypass. Writes are same-origin JSON POSTs (`checkWrite`). The pages put data on
+  the page as text only (no `innerHTML`; `test/ui.test.ts` checks), and the CSP allows only the
+  Worker's own scripts. Channel secrets stay write-only: never return a value from the API.
+- The transcript page reads the R2 backups (each is the whole session so far, `ui/transcript.js`
+  parses it in the browser) and the live turn: the runner sends `liveEntries` (`box/progress.mjs`)
+  with each `/sandbox/progress` report, and the thread's Durable Object keeps them under its own
+  `live` key, only for the turn running in the token's thread (`src/live.ts`, capped).
+- The App Home tab (`src/home.ts`) is seen by everyone in the workspace: it lists only public
+  channels (`isPublicChannel`) and the viewer's own DM, never a private channel's threads or routines.

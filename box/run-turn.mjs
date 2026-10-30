@@ -40,7 +40,7 @@ import { gzipSync } from 'node:zlib'
 import { DOWNLOAD_ACTIVITY, downloadAll, downloadDeadline, filesNote } from './files.mjs'
 import { deliver, hookSettings, READ_ACTIVITY, takenTs } from './inbox.mjs'
 import { changesSince, memoryNote, pull, push, readLocal, writeMemorySettings } from './memory.mjs'
-import { createProgress, onStreamEvent, shouldSendStatus, TICK_MS } from './progress.mjs'
+import { createProgress, LIVE_BATCH, liveEntries, onStreamEvent, queueLive, requeueLive, shouldSendStatus, TICK_MS } from './progress.mjs'
 
 const env = process.env
 // TURN_LOCK_FILE and PROGRESS_TICK_MS exist for the runner's tests only.
@@ -145,6 +145,13 @@ async function runClaude() {
   // Follow-ups written to the inbox so far, and how many Claude has read.
   const written = new Set()
   let readCount = 0
+  // The live transcript page (src/live.ts): entries wait here and ride the next report.
+  const live = []
+  try {
+    queueLive(live, [{ kind: 'prompt', text: readFileSync(env.PROMPT_FILE, 'utf8').slice(0, 4000) }])
+  } catch {
+    // No prompt file is reported by the claude run itself.
+  }
   const ticker = env.PROGRESS_URL ? setInterval(tick, Number(env.PROGRESS_TICK_MS) || TICK_MS) : null
 
   async function tick() {
@@ -159,14 +166,20 @@ async function runClaude() {
     const now = Date.now()
     const at = version
     const send = shouldSendStatus({ changed: at !== sentVersion, lastSentAt, now })
+    const events = live.splice(0, LIVE_BATCH)
     try {
       const res = await fetch(env.PROGRESS_URL, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${env.CALLBACK_TOKEN}` },
         // Only what Claude is doing. The Worker reads the thread and the clock from its own records.
-        body: JSON.stringify({ turnId: env.TURN_ID, ...(send ? { activity: progress.activity, steps: progress.steps } : {}) }),
+        body: JSON.stringify({
+          turnId: env.TURN_ID,
+          ...(send ? { activity: progress.activity, steps: progress.steps } : {}),
+          ...(events.length ? { events } : {}),
+        }),
         signal: AbortSignal.timeout(15_000),
       })
+      if (!res.ok) requeueLive(live, events)
       if (res.ok) {
         if (send) {
           sentVersion = at
@@ -177,7 +190,8 @@ async function runClaude() {
         else if (answer?.messages?.length) deliver(INBOX, answer.messages, written)
       }
     } catch {
-      // A missed tick costs one status edit; the next tick tries again.
+      // A missed tick costs one status edit; the next tick tries again, live entries included.
+      requeueLive(live, events)
     } finally {
       ticking = false
     }
@@ -244,6 +258,7 @@ async function runClaude() {
           const event = JSON.parse(line)
           if (event.type === 'result') final = event
           if (onStreamEvent(progress, event)) version++
+          queueLive(live, liveEntries(event))
         } catch {
           // not JSON; ignore
         }

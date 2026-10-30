@@ -59,8 +59,9 @@ export function formatElapsed(ms: number) {
 }
 
 /**
- * The transcript page for a thread. The page itself is part of the web UI (/ui); until that is
- * deployed the link leads nowhere useful, which costs nothing.
+ * The transcript page for a thread (/ui/follow, src/ui-routes.ts): its R2 backups and the live
+ * turn. Behind Cloudflare Access, so the link carries no credential; a forwarded link opens nothing
+ * for someone Access does not let in.
  */
 export function followUrl(origin: string, channel: string, threadTs: string) {
   const url = new URL('/ui/follow', origin)

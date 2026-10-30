@@ -37,8 +37,8 @@ Ask each one on its own, with these options, and wait for the answer.
 - Copy `.env.setup.example` to `.env.setup`.
 - Write the provider they picked into `SANDBOX_PROVIDER` (`e2b` or `impello`). That is not a secret.
 - Ask the human to open `.env.setup` in their editor and paste in `SANDBOX_API_KEY` and ONE of
-  `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`, then save it and tell you. Leave the Slack, GitHub and
-  `MEMORY_REPO` lines empty for now.
+  `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`, then save it and tell you. Leave the Slack, GitHub,
+  `MEMORY_REPO` and `ACCESS_*` lines empty for now.
 
 ## 4. Run setup
 
@@ -90,7 +90,32 @@ start until it is done. Walk the human through "GitHub App" in the README:
 Then run setup again with `--skip-template`. Remind them to protect `main` in the repos the bot
 works in.
 
-## 7. Test it
+## 7. The web UI behind Cloudflare Access (the human does this)
+
+The web UI (`/ui`: live transcripts, routines, channel settings and secrets) is only reachable
+through Cloudflare Access, and the Worker checks Access's signed token as well. Until this is done
+the UI answers "not set up" to everyone, and the bot works fine without it. Walk the human through
+README "Web UI":
+
+1. In the Cloudflare dashboard: **Zero Trust > Access > Applications > Add an application >
+   Self-hosted**. Hostname: the Worker's host (from setup's output). **Path: `ui`**. A policy that
+   allows only their own email (Action: Allow, Include: Emails).
+2. It must cover `ui` and nothing else. If it covers the whole host, Slack and GitHub get Access's
+   login page instead of the Worker, and the bot stops answering.
+3. From the application's Overview tab they copy the **Application Audience (AUD) Tag** into
+   `ACCESS_AUD` in `.env.setup`, and the team domain (**Zero Trust > Settings**,
+   `<team>.cloudflareaccess.com`) into `ACCESS_TEAM_DOMAIN`. Neither is a secret; you may write them.
+
+Then run setup again with `--skip-template`. Check both halves yourself:
+
+```bash
+curl -s <worker>/                 # must say "slack-agent is running": Slack still reaches the Worker
+curl -sI <worker>/ui/ | head -3   # must redirect to <team>.cloudflareaccess.com: the UI is behind Access
+```
+
+Then the human opens `<worker>/ui/` in a browser, signs in, and sees the Threads page.
+
+## 8. Test it
 
 - Ask the human to invite the bot to a channel (`/invite @percy-jr`) and @mention it with a question.
 - Run `npx wrangler tail --format pretty` while they do, and read it together. A 👀 on their message
@@ -109,9 +134,15 @@ works in.
 - Ask them to tell the bot something worth keeping ("remember that we deploy with `npm run ship`"),
   then ask about it in a NEW thread in the same channel. The memory repo shows a commit named for
   the channel, and the new thread knows the answer.
+- While a turn runs, ask them to click **Follow along** on the status message: the transcript page
+  shows the turn's prompt and each tool call as it happens, and the finished turns from R2 once it
+  ends. Then ask them to open the bot's **Home** tab in Slack: recent threads, routines and an
+  "Open the web UI" button.
+- On the web UI's **Channels** page, they can mark a test channel as watched; a new message there
+  without an @mention then gets an answer.
 - If nothing happens, see "When something goes wrong" in the README.
 
-## 8. Finish
+## 9. Finish
 
 - Tell the human `.env.setup` can be deleted now (the secrets are stored in Cloudflare), and offer to
   delete it.

@@ -335,6 +335,7 @@ export function runPrompt(r: Pick<RoutineRow, 'id' | 'prompt' | 'cron' | 'timezo
 export function routineView(r: RoutineRow) {
   return {
     id: r.id,
+    channel: r.channel,
     prompt: r.prompt,
     cron: r.cron,
     timezone: r.timezone,

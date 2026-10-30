@@ -149,9 +149,18 @@ test('a Stop from the progress door ends Claude and reports the turn as stopped'
     assert.deepEqual(JSON.parse(body), { turnId: 'turn-1', ok: false, stopped: true, error: 'stopped' })
     assert.ok(Date.now() - started < 10_000, 'stopped long before claude would have finished')
     const shown = ticks.findIndex((t) => t.steps === 1)
-    assert.deepEqual(ticks[shown], { turnId: 'turn-1', activity: 'Running `make build`', steps: 1, auth: 'Bearer tok' })
+    const { events: _e, ...status } = ticks[shown]
+    assert.deepEqual(status, { turnId: 'turn-1', activity: 'Running `make build`', steps: 1, auth: 'Bearer tok' })
     // Nothing changed since, so the next tick only asks whether to stop.
     assert.deepEqual(ticks[shown + 1], { turnId: 'turn-1', auth: 'Bearer tok' })
+    // The live transcript page got the prompt and the tool call, each once, in order (src/live.ts).
+    assert.deepEqual(
+      ticks.flatMap((t) => (t.events as unknown[]) ?? []),
+      [
+        { kind: 'prompt', text: 'hi' },
+        { kind: 'tool', name: 'Bash', text: '{\n  "command": "make build"\n}' },
+      ],
+    )
   } finally {
     child.kill('SIGKILL')
     server.closeAllConnections()

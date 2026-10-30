@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { sweepRoutines } from '../src/routine-fire.ts'
-import { claimRun, createRoutine, deleteRoutine, dueRoutines, getRoutine, listRoutines, listRuns, setRoutineStatus } from '../src/routine-store.ts'
+import { claimRun, createRoutine, deleteRoutine, dueRoutines, getRoutine, listRoutines, listRuns, setRoutineStatus, updateRoutine } from '../src/routine-store.ts'
 import { checkRoutineAction, checkTimezone, escapeSlack, nextRunAt, parseCron, runHeader, runPrompt, type Cron } from '../src/routines.ts'
 import { abortStart, acceptRoutineRun, authorView, emptyThread, finish, type ThreadData } from '../src/thread.ts'
 
@@ -440,4 +440,21 @@ test('routine command calls the routines door with the tools token', async () =>
 
   const refuse = async () => Response.json({ ok: false, error: 'no routine x in this channel' }, { status: 404 })
   await assert.rejects(run({ command: 'routine', action: 'delete', id: 'x' }, { env, fetchImpl: refuse }), /refused: no routine x/)
+})
+
+test('the web UI edits a routine: an active one is rescheduled from now, a paused one stays paused', async () => {
+  const { env } = fakeD1()
+  const a = await createRoutine(env, newRoutine('CHANNELA'), NOW)
+  const edited = await updateRoutine(env, a.id, { prompt: 'check CD', cron: '30 10 * * *', timezone: 'Asia/Tokyo', model: 'haiku' }, NOW)
+  assert.equal(edited?.prompt, 'check CD')
+  assert.equal(edited?.channel, 'CHANNELA', 'a routine stays in the channel it was made in')
+  assert.equal(edited?.model, 'haiku')
+  assert.equal(iso(edited!.nextRunAt), '2026-10-31T01:30:00.000Z')
+
+  await setRoutineStatus(env, null, a.id, 'paused', NOW)
+  const pausedEdit = await updateRoutine(env, a.id, { prompt: 'x', cron: '0 9 * * *', timezone: 'UTC', model: null }, NOW)
+  assert.equal(pausedEdit?.status, 'paused')
+  assert.equal(pausedEdit?.nextRunAt, null)
+  assert.equal(await updateRoutine(env, 'zzzzzzzzzz', { prompt: 'x', cron: '0 9 * * *', timezone: 'UTC', model: null }, NOW), null)
+  await assert.rejects(updateRoutine(env, a.id, { prompt: 'x', cron: 'nope', timezone: 'UTC', model: null }, NOW))
 })

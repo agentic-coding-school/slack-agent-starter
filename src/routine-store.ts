@@ -79,6 +79,38 @@ export async function setRoutineStatus(env: DbEnv, channel: string | null, id: s
   return routineView((await getRoutine(env, null, id))!)
 }
 
+export interface RoutineEdit {
+  prompt: string
+  cron: string
+  timezone: string
+  model: string | null
+}
+
+/**
+ * Changes a routine's prompt, schedule, time zone or model (the web UI's edit). An active routine's
+ * next run is counted again from now on the new schedule; a paused one stays paused. Null when the
+ * routine does not exist. The channel never changes: a routine runs where it was made.
+ */
+export async function updateRoutine(env: DbEnv, id: string, edit: RoutineEdit, now = Date.now()) {
+  const row = await getRoutine(env, null, id)
+  if (!row) return null
+  const cron = parseCron(edit.cron)
+  if (!cron.ok) throw new Error(cron.error)
+  const next = row.status === 'active' ? nextRunAt(cron.value, edit.timezone, now) : null
+  await dbRun(
+    env,
+    'UPDATE routines SET prompt = ?, cron = ?, timezone = ?, model = ?, next_run_at = ?, updated_at = ? WHERE id = ?',
+    edit.prompt,
+    edit.cron,
+    edit.timezone,
+    edit.model,
+    next,
+    now,
+    id,
+  )
+  return routineView((await getRoutine(env, null, id))!)
+}
+
 /** Deletes a routine and its run records. False when it is not in that channel. */
 export async function deleteRoutine(env: DbEnv, channel: string | null, id: string): Promise<boolean> {
   const row = await getRoutine(env, channel, id)

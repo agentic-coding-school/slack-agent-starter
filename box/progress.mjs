@@ -37,6 +37,49 @@ export function onStreamEvent(progress, event) {
   return changed
 }
 
+/** Longest text in one live entry. The Worker caps it again (src/live.ts). */
+export const LIVE_TEXT_MAX = 4000
+/** Most entries waiting to be sent; past it the oldest go, so a stuck Worker cannot fill memory. */
+export const LIVE_QUEUE_MAX = 1000
+/** Most entries sent with one report. */
+export const LIVE_BATCH = 100
+
+/**
+ * What the transcript page shows of one stream-json event: Claude's text, thinking and tool calls,
+ * and the tools' results. The finished turn's full transcript reaches R2 anyway; this is only the
+ * live view, so long text is clipped.
+ */
+export function liveEntries(event) {
+  const content = Array.isArray(event?.message?.content) ? event.message.content : []
+  const out = []
+  if (event?.type === 'assistant') {
+    for (const block of content) {
+      if (block?.type === 'text' && block.text?.trim()) out.push({ kind: 'text', text: clip(block.text, LIVE_TEXT_MAX, false) })
+      else if (block?.type === 'thinking' && block.thinking?.trim()) out.push({ kind: 'thinking', text: clip(block.thinking, LIVE_TEXT_MAX, false) })
+      else if (block?.type === 'tool_use') out.push({ kind: 'tool', name: String(block.name ?? 'tool'), text: clip(JSON.stringify(block.input ?? {}, null, 2), LIVE_TEXT_MAX, false) })
+    }
+  } else if (event?.type === 'user') {
+    for (const block of content) {
+      if (block?.type !== 'tool_result') continue
+      const text = typeof block.content === 'string' ? block.content : Array.isArray(block.content) ? block.content.map((c) => (c?.type === 'text' ? c.text : `[${c?.type ?? 'part'}]`)).join('\n') : ''
+      out.push({ kind: block.is_error ? 'error' : 'result', text: clip(text, LIVE_TEXT_MAX, false) })
+    }
+  }
+  return out
+}
+
+/** Adds entries to the send queue, dropping the oldest past LIVE_QUEUE_MAX. */
+export function queueLive(queue, entries) {
+  queue.push(...entries)
+  if (queue.length > LIVE_QUEUE_MAX) queue.splice(0, queue.length - LIVE_QUEUE_MAX)
+}
+
+/** Puts a batch that was not delivered back at the front, still within LIVE_QUEUE_MAX. */
+export function requeueLive(queue, entries) {
+  queue.unshift(...entries)
+  if (queue.length > LIVE_QUEUE_MAX) queue.splice(0, queue.length - LIVE_QUEUE_MAX)
+}
+
 /** One short line per tool call: what a person watching would want to know. */
 export function describeTool(name, input) {
   switch (name) {
@@ -76,8 +119,8 @@ function code(text, max = 60) {
   return t ? `\`${t}\`` : '…'
 }
 
-function clip(text, max) {
-  const t = String(text ?? '').replace(/\s+/g, ' ').trim()
+function clip(text, max, oneLine = true) {
+  const t = oneLine ? String(text ?? '').replace(/\s+/g, ' ').trim() : String(text ?? '')
   return t.length > max ? t.slice(0, max - 1) + '…' : t
 }
 

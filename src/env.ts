@@ -46,6 +46,13 @@ export interface Env {
   /** The memory repo, `owner/name` (a var in wrangler.jsonc). One folder per channel: src/memory.ts. */
   MEMORY_REPO: string
 
+  /**
+   * The web UI's Cloudflare Access application (src/access.ts): the Zero Trust team domain and the
+   * application's AUD tag. Vars in wrangler.jsonc. Either empty, the UI refuses every request.
+   */
+  ACCESS_TEAM_DOMAIN?: string
+  ACCESS_AUD?: string
+
   MAX_TURN_MINUTES: string
   IDLE_PAUSE_MINUTES: string
 }

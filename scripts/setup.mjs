@@ -140,6 +140,16 @@ const memoryRepo = (answers.MEMORY_REPO ?? '').replace(/^https:\/\/github\.com\/
 const memoryRepoOk = MEMORY_REPO_RE.test(memoryRepo)
 if (memoryRepoOk) setVar('MEMORY_REPO', memoryRepo)
 
+// The web UI's Cloudflare Access application (README, "Web UI"): plain vars too. Made after the
+// first deploy, since it needs the Worker's address. Unset, /ui refuses everyone (src/access.ts).
+const accessTeam = (answers.ACCESS_TEAM_DOMAIN ?? '').trim().toLowerCase().replace(/^https:\/\//, '').replace(/\/+$/, '')
+const accessAud = (answers.ACCESS_AUD ?? '').trim()
+const accessOk = /^[a-z0-9-]{1,63}(\.cloudflareaccess\.com)?$/.test(accessTeam) && /^[A-Za-z0-9]{16,128}$/.test(accessAud)
+if (accessOk) {
+  setVar('ACCESS_TEAM_DOMAIN', accessTeam)
+  setVar('ACCESS_AUD', accessAud)
+}
+
 step('Queue, bucket, database and Worker')
 const queue = wrangler(['queues', 'create', QUEUE], { capture: true })
 if (!queue.ok && !/already exists|already taken|11009/i.test(queue.out)) {
@@ -254,6 +264,18 @@ if (!memoryRepoOk) {
   )
 }
 
+if (!accessOk) {
+  const host = workerUrl ? new URL(workerUrl).host : '<worker host>'
+  next.push(
+    ((answers.ACCESS_TEAM_DOMAIN || answers.ACCESS_AUD) ? 'ACCESS_TEAM_DOMAIN or ACCESS_AUD is not in the right form. ' : '') +
+      `The human puts the web UI behind Cloudflare Access (README, "Web UI"): Zero Trust > Access > Applications > Add an application > ` +
+      `Self-hosted, hostname ${host}, path ui, with a policy that allows only their own email. It must cover ui and nothing else, or ` +
+      'Slack and GitHub are locked out. They put its Application Audience (AUD) Tag into ACCESS_AUD and the team domain ' +
+      '(Zero Trust > Settings, <team>.cloudflareaccess.com) into ACCESS_TEAM_DOMAIN, and you run setup again. Until then the ' +
+      'web UI, the Follow along link and the App Home link answer "not set up".',
+  )
+}
+
 rl?.close()
 console.log(`\n${bold('Setup ran.')} Worker: ${workerUrl ?? '?'}`)
 if (next.length) {
@@ -303,6 +325,11 @@ async function askEverything() {
   a.MEMORY_REPO = (await rl.question('Memory repo, owner/name (for example you/my-bot-memory): ')).trim()
   console.log('\nThe webhook secret is the string you typed into the GitHub App\'s Webhook secret field.')
   a.GITHUB_WEBHOOK_SECRET = await askHidden('GitHub App webhook secret (Enter to skip):')
+
+  console.log('\nThe web UI sits behind Cloudflare Access (README, "Web UI"). Its application needs the Worker URL,')
+  console.log('so skip these on the first run; setup then tells you how to make it.')
+  a.ACCESS_TEAM_DOMAIN = (await rl.question('Access team domain, <team>.cloudflareaccess.com (Enter to skip): ')).trim()
+  a.ACCESS_AUD = (await rl.question('Access application AUD tag (Enter to skip): ')).trim()
   return a
 }
 

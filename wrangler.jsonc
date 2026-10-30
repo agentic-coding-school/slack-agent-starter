@@ -37,8 +37,9 @@
   // the deploy, which `npm run setup` runs. Minute precision is what lets a routine run that often.
   "triggers": { "crons": ["* * * * *"] },
 
-  // The script the sandbox runs for each turn, and the instructions Claude reads there.
-  "rules": [{ "type": "Text", "globs": ["**/box/*.md", "**/box/*.mjs"], "fallthrough": true }],
+  // The script the sandbox runs for each turn, and the instructions Claude reads there. And the web
+  // UI's page, script and styles (ui/), served by the Worker behind Cloudflare Access.
+  "rules": [{ "type": "Text", "globs": ["**/box/*.md", "**/box/*.mjs", "**/ui/*.html", "**/ui/*.js", "**/ui/*.css"], "fallthrough": true }],
 
   "vars": {
     // "e2b" or "impello". `npm run setup` sets this for you.
@@ -51,6 +52,11 @@
     "IDLE_PAUSE_MINUTES": "5",
     // The bot's memory: a private GitHub repo, owner/name, with the GitHub App installed on it.
     // One folder per Slack channel (src/memory.ts). `npm run setup` sets this for you.
-    "MEMORY_REPO": ""
+    "MEMORY_REPO": "",
+    // The web UI (/ui) sits behind Cloudflare Access, and the Worker checks Access's JWT too. Your
+    // Zero Trust team domain (for example myteam.cloudflareaccess.com) and the Access application's
+    // AUD tag. Empty means the UI refuses everyone. `npm run setup` sets them (README, "Web UI").
+    "ACCESS_TEAM_DOMAIN": "",
+    "ACCESS_AUD": ""
   }
 }

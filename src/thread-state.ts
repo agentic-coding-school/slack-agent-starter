@@ -32,6 +32,7 @@ import {
 } from './thread.ts'
 import type { ModelAlias, ModelCommand } from './models.ts'
 import { enqueueTurn } from './turn.ts'
+import { appendLive, type LiveEntry, type LiveLog, type LiveView } from './live.ts'
 
 /** How soon the alarm retries a turn whose job could not be queued. */
 const REQUEUE_DELAY_MS = 10_000
@@ -151,6 +152,30 @@ export class ThreadState extends DurableObject<Env> {
   /** Read-only: whether the turn runs, and who asked for it, for the routines door. */
   async authorView(turnId: string) {
     return authorView(await this.ctx.storage.get<ThreadData>('thread'), turnId)
+  }
+
+  /**
+   * The live turn's log for the web UI (src/live.ts). Kept only for the turn running now (rule 1),
+   * under its own key so a long log never weighs on the thread record. No I/O between the read and
+   * the write.
+   */
+  async appendLive(turnId: string, entries: LiveEntry[]): Promise<boolean> {
+    const data = await this.ctx.storage.get<ThreadData>('thread')
+    if (!data?.running || data.running.turnId !== turnId || !entries.length) return false
+    const log = await this.ctx.storage.get<LiveLog>('live')
+    await this.ctx.storage.put('live', appendLive(log, turnId, data.running.startedAt, entries))
+    return true
+  }
+
+  /** Read-only: the running turn and the newest log, for the transcript page. */
+  async liveView(): Promise<LiveView> {
+    const data = await this.ctx.storage.get<ThreadData>('thread')
+    const log = (await this.ctx.storage.get<LiveLog>('live')) ?? null
+    const r = data?.running
+    return {
+      running: r ? { turnId: r.turnId, startedAt: r.startedAt, ...(r.model ? { model: r.model } : {}), stopping: Boolean(r.stopRequestedBy) } : null,
+      log,
+    }
   }
 
   /** Rule 10: true once per key per thread, saved before the caller posts the note. */

@@ -191,6 +191,11 @@ gets a token for the memory repo; see [Memory](#memory).
   page, a diff, Block Kit) and a session status. See [Code channels](#code-channels).
 - **It remembers, per channel.** Claude Code's own auto memory writes notes into a folder, and the
   bot keeps that folder in your memory repo, one folder per channel. See [Memory](#memory).
+- **A web UI, behind Cloudflare Access.** `/ui` shows each thread's transcript (every prompt, tool
+  call and result, from the R2 backups plus the turn running now), the routines (add, edit, pause,
+  delete, see runs) and the channel settings. See [Web UI](#web-ui).
+- **The Home tab** in Slack lists recent threads, routines and a link to the web UI, for public
+  channels and your own DM with the bot only.
 - **The Slack token never enters the sandbox.** The sandbox gets a token that can post one turn's answer
   into one thread, and it expires. Claude reads text anyone can write, so the sandbox holds as little
   as possible.
@@ -221,10 +226,16 @@ gets a token for the memory repo; see [Memory](#memory).
 | `src/pr-follow-fire.ts` | The GitHub webhook route, and the every-minute sweep that wakes a followed PR's thread |
 | `src/code-channels.ts` | The code-channel rules: the closed action set, the tab fields, nested creates, feature off |
 | `src/code-channel-door.ts` | The code-channel door's Slack calls: create, post, view, status, archive, summary |
+| `src/access.ts` | The web UI's sign-in check: verifies the Cloudflare Access JWT (team, AUD, signature, time) |
+| `src/ui.ts` | The web UI rules: same-origin JSON writes, which transcript a page may read, what the Routines and Channels pages may send |
+| `src/ui-routes.ts` | The web UI's pages and API under `/ui`, and the App Home tab's publish |
+| `src/home.ts` | The App Home tab: what it lists (public channels and your own DM only) |
+| `src/live.ts` | The live turn for the transcript page: what the sandbox may send, the capped log |
+| `ui/` | The web UI: one HTML shell, one script, one stylesheet, and `transcript.js` (reads a backup) |
 | `src/db.ts` | The D1 database helpers |
 | `migrations/` | The D1 tables. `npm run setup` applies them |
 | `box/run-turn.mjs` | Runs inside the sandbox: runs Claude, reports progress, posts the answer back |
-| `box/progress.mjs` | Runs inside the sandbox: turns Claude's stream events into the status line |
+| `box/progress.mjs` | Runs inside the sandbox: turns Claude's stream events into the status line and the live transcript |
 | `box/memory.mjs` | Runs inside the sandbox: pulls the channel's notes before Claude starts and pushes what changed |
 | `box/files.mjs` | Runs inside the sandbox: downloads the turn's files before Claude starts |
 | `box/tools.mjs` | Runs inside the sandbox: Claude's commands to post a file or a canvas into its thread, to search public channels, to make and change routines, to follow a PR, and to drive a code channel |
@@ -343,6 +354,32 @@ Claude has six actions and no others, through `/sandbox/code-channel` with its t
 - **Talking to it there** works as anywhere else: @mention the bot in the code channel and it
   answers in a thread.
 
+## Web UI
+
+The Worker serves a small web UI at `/ui`, plain HTML and JavaScript from `ui/`:
+
+- **Threads** (`/ui/`): the threads with transcript backups, newest first.
+- **Follow** (`/ui/follow?channel=…&thread=…`, the **Follow along** link on every status message):
+  the thread's transcript. Every finished turn comes from the newest R2 backup (each backup is the
+  whole session so far; pick an older one from the list). The turn running now comes from the
+  sandbox's progress reports: the prompt, Claude's text and thinking, each tool call and its result,
+  every few seconds. The page refreshes every 5 seconds.
+- **Routines** (`/ui/routines`): every routine in every channel. Add one (give the channel id), edit
+  its prompt, schedule, time zone or model, pause, resume, delete, and see its runs.
+- **Channels** (`/ui/channels`): watched on or off, the default model, and secrets. A secret is
+  write-only: the page sets and deletes it and shows its name, and the value never comes back out.
+
+**It is behind Cloudflare Access, and the Worker checks too.** You make an Access application that
+covers the path `ui` on the Worker's host (SETUP.md step 7), with a policy that lets in only you.
+Access signs you in and adds a signed token to each request; the Worker verifies that token itself
+(`src/access.ts`: RS256, your team's keys, your application's AUD tag, not expired) on every page
+and API call. With `ACCESS_TEAM_DOMAIN` or `ACCESS_AUD` unset, it refuses everyone. A change must be
+a JSON POST from the page itself (its `Origin`), so another site cannot use your sign-in. The UI
+sees every channel, private ones included, so keep its Access policy to yourself.
+
+The App Home tab in Slack is for everyone in the workspace, so it lists only public channels' threads
+and routines, plus the viewer's own DM with the bot.
+
 ## Transcript backups
 
 Every turn's transcript is copied to the R2 bucket `slack-agent-transcripts` and **never deleted**:
@@ -360,6 +397,8 @@ In `wrangler.jsonc` under `vars`. Run `npm run deploy` after you change one.
 | `IDLE_PAUSE_MINUTES` | 5 | How long a thread may be quiet before its sandbox pauses. |
 | `SANDBOX_TEMPLATE` | `slack-agent` | The sandbox image name. |
 | `MEMORY_REPO` | (set by setup) | The memory repo, `owner/name`. Required. |
+| `ACCESS_TEAM_DOMAIN` | (set by setup) | The web UI's Cloudflare Access team, `<team>.cloudflareaccess.com`. Empty: the UI refuses everyone. |
+| `ACCESS_AUD` | (set by setup) | The web UI's Access application AUD tag. Empty: the UI refuses everyone. |
 
 ## When something goes wrong
 
@@ -381,6 +420,14 @@ In `wrangler.jsonc` under `vars`. Run `npm run deploy` after you change one.
 - **"Code channels are not turned on":** Slack refused the beta (`feature_disabled`,
   `missing_scope`, `unknown_method`). Check the app has `code_channels:manage` and Code channels on
   in its manifest and was reinstalled after; the workspace may simply not have the beta yet.
+- **The web UI says "not set up":** `ACCESS_TEAM_DOMAIN` or `ACCESS_AUD` is empty or not in the
+  right form; run setup again with them in `.env.setup`. **"another application"** means
+  `ACCESS_AUD` is not this Access application's AUD tag; **"no Access token"** means the request did
+  not come through Access (check the application's path is `ui` on the Worker's host).
+- **Slack stopped reaching the Worker after Access went on:** the Access application covers more than
+  `ui`. Edit it so the path is `ui`; `curl <worker>/` must answer "slack-agent is running".
+- **The Home tab is empty or says "This is still being worked on":** reinstall the app from the
+  manifest (it turns on `home_tab_enabled` and subscribes to `app_home_opened`).
 - **"Invalid API key" from Claude:** the Claude secret is wrong or expired. Run
   `npx wrangler secret put CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) again.
 

@@ -5,7 +5,7 @@
     "background_color": "#1d1c1d"
   },
   "features": {
-    "app_home": { "messages_tab_enabled": true, "messages_tab_read_only_enabled": false },
+    "app_home": { "home_tab_enabled": true, "messages_tab_enabled": true, "messages_tab_read_only_enabled": false },
     "bot_user": { "display_name": "percy-jr", "always_online": true },
     "code_channels": { "enabled": true },
     "agent_view": {
