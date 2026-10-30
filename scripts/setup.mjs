@@ -13,6 +13,7 @@ import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { stdin, stdout } from 'node:process'
 import { createInterface } from 'node:readline/promises'
+import { generatedSecretsToCreate, parseSecretList } from './secret-list.ts'
 
 const WRANGLER = ['npx', '--yes', 'wrangler']
 const QUEUE = 'slack-agent-turns'
@@ -29,7 +30,7 @@ const step = (s) => console.log(`\n${bold('==')} ${s}`)
 
 function run(cmd, args, opts = {}) {
   const r = spawnSync(cmd, args, { stdio: opts.capture ? ['inherit', 'pipe', 'pipe'] : 'inherit', encoding: 'utf8', ...opts })
-  return { ok: r.status === 0, out: `${r.stdout ?? ''}${r.stderr ?? ''}` }
+  return { ok: r.status === 0, out: `${r.stdout ?? ''}${r.stderr ?? ''}`, stdout: r.stdout ?? '' }
 }
 const wrangler = (args, opts) => run(WRANGLER[0], [...WRANGLER.slice(1), ...args], opts)
 
@@ -39,13 +40,10 @@ function putSecret(name, value) {
   console.log(`  stored ${name}`)
 }
 
+/** The Worker's secret names, or null when they could not be read. Never an empty set on failure. */
 function existingSecrets() {
   const r = wrangler(['secret', 'list', '--format', 'json'], { capture: true })
-  try {
-    return new Set(JSON.parse(r.out.slice(r.out.indexOf('['))).map((s) => s.name))
-  } catch {
-    return new Set()
-  }
+  return parseSecretList(r.ok, r.stdout)
 }
 
 function setVar(name, value) {
@@ -189,14 +187,20 @@ const workerUrl = deploy.out.match(/https:\/\/[^\s]+\.workers\.dev/)?.[0]
 console.log(`  deployed: ${workerUrl ?? '(no workers.dev URL in the output; find it in the Cloudflare dashboard)'}`)
 
 step('Secrets')
-const have = existingSecrets()
+// Generated once, and only when the secret list was read and does not name them. CALLBACK_SECRET:
+// replacing it would cut off any turn that is running right now. CHANNEL_SECRETS_KEY encrypts
+// per-channel secrets (src/channels.ts): replacing it would make every channel secret already
+// stored unreadable, for good. So a failed `wrangler secret list` stops setup here.
+let toGenerate
+try {
+  toGenerate = generatedSecretsToCreate(existingSecrets(), ['CALLBACK_SECRET', 'CHANNEL_SECRETS_KEY'])
+} catch {
+  console.error('NEXT: `wrangler secret list` failed or printed something setup cannot read, so no secret was written. Check `npx wrangler secret list` works (and `npx wrangler whoami`), then run setup again.')
+  process.exit(1)
+}
 putSecret('SANDBOX_API_KEY', answers.SANDBOX_API_KEY)
 putSecret(claudeName, answers[claudeName])
-// Generated once. Replacing it would cut off any turn that is running right now.
-if (!have.has('CALLBACK_SECRET')) putSecret('CALLBACK_SECRET', randomBytes(32).toString('hex'))
-// Encrypts per-channel secrets (src/channels.ts). Generated once, like CALLBACK_SECRET: replacing it
-// would make every channel secret already stored unreadable.
-if (!have.has('CHANNEL_SECRETS_KEY')) putSecret('CHANNEL_SECRETS_KEY', randomBytes(32).toString('hex'))
+for (const name of toGenerate) putSecret(name, randomBytes(32).toString('hex'))
 
 const next = []
 if (workerUrl) {
