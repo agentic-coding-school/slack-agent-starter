@@ -80,6 +80,10 @@ start until it is done. Walk the human through "GitHub App" in the README:
 2. They create the GitHub App and install it on the memory repo and on any repos the bot may work in.
 3. They fill in `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH` (the path to the downloaded `.pem`
    file) and `MEMORY_REPO` (`owner/name`, not a secret; you may write it yourself) in `.env.setup`.
+4. The App's webhook stays **Active**: Webhook URL `<worker>/github/webhook` (setup printed the
+   Worker URL), a Webhook secret they make, and the events in README "GitHub App" step 3. They put
+   the same secret into `GITHUB_WEBHOOK_SECRET` in `.env.setup`. Do not make it or read it yourself.
+   It is how the bot comes back to a PR it opened when CI fails or someone reviews.
 
 Then run setup again with `--skip-template`. Remind them to protect `main` in the repos the bot
 works in.
@@ -94,6 +98,9 @@ works in.
   seconds the bot posts "Stopped".
 - Ask them to send a follow-up while a longer task runs ("also add a test"). It gets a 📨, the
   status line soon says "Read your new message", and the one answer covers both. Nothing to set up.
+- If they have a test repo, ask the bot to open a small PR there. Its reply links the PR, and a
+  comment on the PR from the human gets a :telescope: line in the thread about a minute later and a
+  new turn. Merging it posts "stopped following".
 - Ask them to tell the bot something worth keeping ("remember that we deploy with `npm run ship`"),
   then ask about it in a NEW thread in the same channel. The memory repo shows a commit named for
   the channel, and the new thread knows the answer.

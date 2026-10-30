@@ -17,13 +17,13 @@ paste a secret into the chat; secrets go in `.env.setup`.
 - D1 tables are made by numbered SQL files in `migrations/`; add a new file, never edit an applied
   one. `npm run setup` applies them. Query through `src/db.ts`, always with bound `?` values.
 - Every sandbox-to-Worker door (`/sandbox/callback`, `/sandbox/transcript`, `/sandbox/progress`,
-  `/sandbox/memory`, `/sandbox/upload`, `/sandbox/canvas`, `/sandbox/search`, `/sandbox/routines`, `/sandbox/file`) checks a signed token and builds every key,
+  `/sandbox/memory`, `/sandbox/upload`, `/sandbox/canvas`, `/sandbox/search`, `/sandbox/routines`, `/sandbox/follow-pr`, `/sandbox/file`) checks a signed token and builds every key,
   channel and thread from the token's claims, never from the request body. Each token purpose signs
   with its own key (`src/callback-token.ts`): `reply` (the runner only; Claude never sees it),
-  `tools` (Claude's, for upload, canvas, search and routines), `file` (one grant per Slack file, `src/files.ts`). Text a sandbox sends for Slack is capped and escaped (`src/status.ts`).
+  `tools` (Claude's, for upload, canvas, search, routines and follow-pr), `file` (one grant per Slack file, `src/files.ts`). Text a sandbox sends for Slack is capped and escaped (`src/status.ts`).
 - Slack's own routes (`/slack/events`, `/slack/interactive`) check the signing secret before reading
   the body. The Stop button only marks the turn (rule 6 in `src/thread.ts`); the sandbox ends it.
-- Never put the Slack bot token, the signing secret or `CALLBACK_SECRET` into a sandbox
+- Never put the Slack bot token, the signing secret, `CALLBACK_SECRET` or `GITHUB_WEBHOOK_SECRET` into a sandbox
   (`test/sandbox-config.test.ts` checks this).
 - Sandboxes pause on timeout, never kill: the Claude transcript lives on the sandbox's disk.
 - Secrets go in with `npx wrangler secret put`. Never commit `.dev.vars` or a key.
@@ -55,3 +55,13 @@ paste a secret into the chat; secrets go in `.env.setup`.
   whether or not it won, so a dead sweep never leaves one stuck. Each run posts a new root message
   and starts its turn through the thread's Durable Object (`acceptRoutineRun` in `src/thread.ts`).
   No limits on count or frequency, by decision; do not add any.
+- Following PRs (`src/pr-follow.ts` rules, `src/pr-follow-store.ts` D1, `src/pr-follow-fire.ts` the
+  webhook and the sweep, `box/tools.mjs follow-pr`): `POST /github/webhook` checks GitHub's
+  HMAC-SHA256 over the raw body with `GITHUB_WEBHOOK_SECRET` before reading anything, and refuses
+  everything when it is unset. `/sandbox/follow-pr` takes the thread from the tools token and asks
+  GitHub that the PR is open and authored by the App's bot (`appBotLogin`), so a thread follows only
+  the bot's own PRs and only for itself; never the memory repo. Events from bots never wake a thread.
+  The webhook only batches lines in D1 (one conditional `UPDATE`); the every-minute sweep wakes the
+  thread through its Durable Object like a mention, at most 3 wakes per PR per UTC day, then posts
+  one "stopped auto-fixing" note. Merged or closed posts a note and ends the follow. GitHub's text
+  is escaped and fenced as data in the prompt (rule 7); keep it that way.

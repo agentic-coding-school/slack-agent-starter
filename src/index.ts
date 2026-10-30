@@ -7,6 +7,10 @@ import { canvasLinkText, checkCanvas, checkUpload, downloadHeaders, filesFromEve
 import { checkPush, MAX_TOTAL_BYTES } from './memory.ts'
 import { pullMemory, pushMemory } from './memory-store.ts'
 import { parseModelCommand } from './models.ts'
+import { appBotLogin, getPull, parseRepo } from './github.ts'
+import { checkFollowAction, followRefusal, prName } from './pr-follow.ts'
+import { githubWebhook, sweepPrFollows } from './pr-follow-fire.ts'
+import { followPr, unfollowPr } from './pr-follow-store.ts'
 import { sweepRoutines } from './routine-fire.ts'
 import { createRoutine, deleteRoutine, listRoutines, setRoutineStatus } from './routine-store.ts'
 import { checkRoutineAction, checkTimezone, routineView } from './routines.ts'
@@ -36,8 +40,13 @@ export { ThreadState } from './thread-state.ts'
  *   POST /sandbox/search    Claude searching the workspace's PUBLIC channels, same tools token.
  *   POST /sandbox/routines  Claude making, listing, pausing or deleting its CHANNEL's routines, same
  *                           tools token (src/routines.ts).
+ *   POST /sandbox/follow-pr Claude following a PR it opened, so GitHub can wake its THREAD, same
+ *                           tools token (src/pr-follow.ts).
+ *   POST /github/webhook    GitHub App events, signed with GITHUB_WEBHOOK_SECRET: CI failures,
+ *                           reviews and comments on a followed PR, and its merge or close.
  *   queue                   Starts a turn in a sandbox (src/turn.ts).
- *   scheduled               The Cron Trigger, every minute: fires due routines (src/routine-fire.ts).
+ *   scheduled               The Cron Trigger, every minute: fires due routines (src/routine-fire.ts)
+ *                           and wakes the threads of followed PRs (src/pr-follow-fire.ts).
  *
  * Plus the thread's alarm (src/thread-state.ts), which pauses quiet sandboxes.
  */
@@ -56,6 +65,8 @@ export default {
     if (request.method === 'POST' && url.pathname === '/sandbox/canvas') return sandboxCanvas(request, env)
     if (request.method === 'POST' && url.pathname === '/sandbox/search') return sandboxSearch(request, env)
     if (request.method === 'POST' && url.pathname === '/sandbox/routines') return sandboxRoutines(request, env)
+    if (request.method === 'POST' && url.pathname === '/sandbox/follow-pr') return sandboxFollowPr(request, env)
+    if (request.method === 'POST' && url.pathname === '/github/webhook') return githubWebhook(request, env)
     if (url.pathname === '/') return new Response('slack-agent is running. Point Slack at /slack/events.\n')
     return new Response('not found', { status: 404 })
   },
@@ -73,7 +84,8 @@ export default {
   },
 
   async scheduled(_controller: ScheduledController, env: Env) {
-    await sweepRoutines(env)
+    // Each sweep catches its own errors, so one never stops the other.
+    await Promise.allSettled([sweepRoutines(env), sweepPrFollows(env)])
   },
 } satisfies ExportedHandler<Env, TurnJob>
 
@@ -481,6 +493,60 @@ async function sandboxRoutines(request: Request, env: Env) {
   const routine = await setRoutineStatus(env, channel, action.id, action.action === 'pause' ? 'paused' : 'active')
   if (!routine) return Response.json({ ok: false, error: `no routine ${action.id} in this channel` }, { status: 404 })
   return Response.json({ ok: true, routine })
+}
+
+/**
+ * Following a PR for Claude (box/tools.mjs follow-pr), rule 1 in src/pr-follow.ts. The thread
+ * comes from the token, and GitHub is asked that the PR is open and was opened by our App, so a
+ * thread can only follow the bot's own PRs and only for itself. Never the memory repo.
+ */
+async function sandboxFollowPr(request: Request, env: Env) {
+  const body = (await request.json().catch(() => null)) as { turnId?: string } | null
+  const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
+  const verified = await verifyCallbackToken(env.CALLBACK_SECRET, token, body?.turnId ?? '', Date.now(), 'tools')
+  if (!verified.ok) return Response.json({ ok: false, error: verified.reason }, { status: 401 })
+
+  const checked = checkFollowAction(body)
+  if (!checked.ok) return Response.json({ ok: false, error: checked.error }, { status: 400 })
+
+  const { channel, threadTs, turnId } = verified.claims
+  const view = await threadStub(env, channel, threadTs).authorView(turnId)
+  if (!view.running) return Response.json({ ok: false, error: 'this turn is over' }, { status: 409 })
+
+  const { action, pr } = checked.value
+  if (action === 'unfollow') {
+    if (!(await unfollowPr(env, pr, { channel, threadTs }))) {
+      return Response.json({ ok: false, error: `this thread does not follow ${prName(pr)}` }, { status: 404 })
+    }
+    return Response.json({ ok: true })
+  }
+
+  const memory = parseRepo(env.MEMORY_REPO)
+  if (memory && `${memory.owner}/${memory.name}`.toLowerCase() === pr.repo) {
+    return Response.json({ ok: false, error: 'the memory repo is never followed' }, { status: 403 })
+  }
+  let pull: Record<string, any> | null
+  let botLogin: string
+  try {
+    ;[pull, botLogin] = await Promise.all([getPull(env, pr.repo, pr.number), appBotLogin(env)])
+  } catch (err) {
+    console.error(`turn ${turnId}: could not read ${prName(pr)}:`, err)
+    return Response.json({ ok: false, error: (err as Error).message }, { status: 502 })
+  }
+  const refusal = followRefusal(pull, botLogin)
+  if (refusal) return Response.json({ ok: false, error: refusal }, { status: 403 })
+
+  await followPr(env, {
+    ...pr,
+    channel,
+    threadTs,
+    origin: url(request),
+    url: typeof pull!.html_url === 'string' ? pull!.html_url : `https://github.com/${pr.repo}/pull/${pr.number}`,
+    title: typeof pull!.title === 'string' ? pull!.title.slice(0, 200) : null,
+    followedBy: view.author ?? null,
+  })
+  console.log(`turn ${turnId} follows ${prName(pr)}`)
+  return Response.json({ ok: true, webhook: Boolean(env.GITHUB_WEBHOOK_SECRET) })
 }
 
 /**

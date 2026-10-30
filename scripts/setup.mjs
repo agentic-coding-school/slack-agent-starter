@@ -235,6 +235,17 @@ if (answers.GITHUB_APP_ID && answers.GITHUB_APP_PRIVATE_KEY_PATH) {
       'the repos the bot may work in. Then they fill in GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_PATH, and you run setup again.',
   )
 }
+// The App's webhook wakes the thread that opened a PR (src/pr-follow.ts). The human makes the secret
+// and pastes the same string into the App's Webhook settings, so setup never has to show it.
+if (answers.GITHUB_WEBHOOK_SECRET) {
+  putSecret('GITHUB_WEBHOOK_SECRET', answers.GITHUB_WEBHOOK_SECRET)
+} else {
+  next.push(
+    `The human turns on the GitHub App's webhook (README, "GitHub App", step 2): Webhook URL ${workerUrl ?? '<worker URL>'}/github/webhook, ` +
+      'and a Webhook secret they make (any long random string). They put the same string into GITHUB_WEBHOOK_SECRET, and you run ' +
+      'setup again. Until then the bot opens PRs but is never woken by them.',
+  )
+}
 if (!memoryRepoOk) {
   next.push(
     (answers.MEMORY_REPO ? `MEMORY_REPO is "${answers.MEMORY_REPO}", which is not owner/name. ` : '') +
@@ -290,6 +301,8 @@ async function askEverything() {
   a.GITHUB_APP_ID = (await rl.question('App ID: ')).trim()
   a.GITHUB_APP_PRIVATE_KEY_PATH = (await rl.question('Path to the private key (.pem): ')).trim()
   a.MEMORY_REPO = (await rl.question('Memory repo, owner/name (for example you/my-bot-memory): ')).trim()
+  console.log('\nThe webhook secret is the string you typed into the GitHub App\'s Webhook secret field.')
+  a.GITHUB_WEBHOOK_SECRET = await askHidden('GitHub App webhook secret (Enter to skip):')
   return a
 }
 

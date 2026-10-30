@@ -3,7 +3,8 @@
 Your own coding agent in Slack. @mention it in a thread, and it runs **Claude Code** in its own
 cloud sandbox and replies in the thread. Follow-ups in the thread continue the same conversation.
 It remembers what it learns in each channel, in a private GitHub repo you own, and through the
-same GitHub App it can clone your repos and open pull requests.
+same GitHub App it can clone your repos, open pull requests, and come back to them when CI fails or
+someone reviews.
 
 It runs on **Cloudflare Workers**, and the sandbox runs on **E2B** or **Impello** (you pick).
 
@@ -87,15 +88,22 @@ same App lets it clone your repos, push a branch and open a pull request.
    make it **Private**, and tick **Add a README** (the bot cannot write to an empty repo).
 
 1. Go to **GitHub > Settings > Developer settings > GitHub Apps > New GitHub App**.
-2. Name it anything. Homepage URL: your Worker URL. **Untick Webhook > Active.**
-3. Repository permissions: **Contents: Read and write**, **Pull requests: Read and write**.
-   Metadata (read) is added for you.
+2. Name it anything. Homepage URL: your Worker URL. Leave **Webhook > Active** ticked, set the
+   **Webhook URL** to `<your Worker URL>/github/webhook`, and the **Webhook secret** to a long random
+   string you make (`openssl rand -hex 32`). The same string goes into `GITHUB_WEBHOOK_SECRET`.
+3. Repository permissions: **Contents: Read and write**, **Pull requests: Read and write**,
+   **Checks: Read-only**, **Commit statuses: Read-only**. Metadata (read) is added for you.
+   Under **Subscribe to events**, tick **Check run**, **Status**, **Pull request**,
+   **Pull request review**, **Pull request review comment** and **Issue comment**.
 4. "Where can this GitHub App be installed?": **Only on this account**. Click **Create**.
 5. Note the **App ID**. Scroll down and click **Generate a private key**. A `.pem` file downloads.
 6. Click **Install App**, then pick **Only select repositories** and choose the **memory repo** and
    the repos the bot may work in.
-7. Run `npm run setup` again and give it the App ID, the `.pem` path and the memory repo
-   (`owner/name`, which goes into `MEMORY_REPO` in `wrangler.jsonc`).
+7. Run `npm run setup` again and give it the App ID, the `.pem` path, the memory repo
+   (`owner/name`, which goes into `MEMORY_REPO` in `wrangler.jsonc`) and the webhook secret.
+
+Made the App before this step existed? Open it (Developer settings > GitHub Apps > Edit), do steps
+2 and 3, and accept the new permissions on the install page (GitHub emails you a link).
 
 **Protect your main branch.** In each repo: Settings > Rules > Rulesets > New branch ruleset,
 target `main`, and tick **Require a pull request before merging**. The bot is told never to push to
@@ -171,6 +179,10 @@ gets a token for the memory repo; see [Memory](#memory).
   `/sandbox/routines` with its tools token; the Worker stores it in D1 under the token's channel. A
   Cron Trigger runs every minute and fires each due routine: the bot posts a new thread in that
   channel and starts a turn there, like a mention. See [Routines](#routines).
+- **It follows the PRs it opens.** After `gh pr create`, Claude runs `node ~/.agent/tools.mjs
+  follow-pr <link>`, and the Worker records the PR against the thread in D1. GitHub's webhook then
+  wakes that thread when CI fails or a person reviews or comments, and says so when the PR is merged
+  or closed. See [Following PRs](#following-prs).
 - **It remembers, per channel.** Claude Code's own auto memory writes notes into a folder, and the
   bot keeps that folder in your memory repo, one folder per channel. See [Memory](#memory).
 - **The Slack token never enters the sandbox.** The sandbox gets a token that can post one turn's answer
@@ -198,13 +210,16 @@ gets a token for the memory repo; see [Memory](#memory).
 | `src/routines.ts` | The routine rules: cron in a time zone, the next run, what the sandbox may ask, what a run posts |
 | `src/routine-store.ts` | Routines and their runs in D1, scoped to a channel, and the claim that fires a run once |
 | `src/routine-fire.ts` | The every-minute sweep: posts each due run's thread and starts its turn |
+| `src/pr-follow.ts` | The PR-follow rules: the webhook signature, which events wake a thread, batching, the daily cap |
+| `src/pr-follow-store.ts` | Followed PRs in D1: follow, batch an event, claim a batch once, end on merge or close |
+| `src/pr-follow-fire.ts` | The GitHub webhook route, and the every-minute sweep that wakes a followed PR's thread |
 | `src/db.ts` | The D1 database helpers |
 | `migrations/` | The D1 tables. `npm run setup` applies them |
 | `box/run-turn.mjs` | Runs inside the sandbox: runs Claude, reports progress, posts the answer back |
 | `box/progress.mjs` | Runs inside the sandbox: turns Claude's stream events into the status line |
 | `box/memory.mjs` | Runs inside the sandbox: pulls the channel's notes before Claude starts and pushes what changed |
 | `box/files.mjs` | Runs inside the sandbox: downloads the turn's files before Claude starts |
-| `box/tools.mjs` | Runs inside the sandbox: Claude's commands to post a file or a canvas into its thread, to search public channels, and to make and change routines |
+| `box/tools.mjs` | Runs inside the sandbox: Claude's commands to post a file or a canvas into its thread, to search public channels, to make and change routines, and to follow a PR |
 | `box/inbox.mjs`, `box/inbox-hook.mjs` | Runs inside the sandbox: follow-ups sent mid-turn, and the hook that hands them to Claude |
 | `box/CLAUDE.md` | The instructions Claude reads in the sandbox. Edit this to change the bot's behavior. |
 | `template/Dockerfile` | The sandbox image. Run `npm run template:build` after you change it. |
@@ -267,6 +282,30 @@ cost real money on an API key, and a lot of them can use up a plan's limits. Che
 `routine list` in each channel now and then. **A routine outlives its thread**, like memory: anyone
 in the workspace can make one, and it keeps running until someone pauses or deletes it.
 
+## Following PRs
+
+When the bot opens a pull request it follows it, and GitHub's webhook brings it back to the thread
+that opened it:
+
+- **A failed check** (a check run or a commit status), **a review**, or **a comment** from a person
+  wakes the thread. The bot posts a short :telescope: line and starts a turn: Claude reads what
+  happened, looks with `gh`, and pushes a fix to the PR's branch or answers in the thread. Comments
+  from bots never wake it, its own included.
+- **Merged or closed** posts a note and stops following the PR.
+- **Events are batched.** The bot waits a minute after the first event, so a CI run that fails five
+  checks wakes it once.
+- **At most 3 wakes per PR per day** (UTC). After that the bot posts "stopped auto-fixing, @mention
+  me to go on" once, and ignores that PR's events until the next day. You can always carry on by
+  talking in the thread.
+- **Only the bot's own PRs.** The Worker asks GitHub that a PR is open and was opened by your App
+  before it follows it, and the thread comes from the sandbox's token. `unfollow-pr <link>` stops
+  it early.
+
+Every delivery must carry GitHub's signature made with `GITHUB_WEBHOOK_SECRET`; anything else is
+refused, and with the secret unset every delivery is. A comment on the PR can be written by anyone
+who can see the repo, so the bot reads GitHub's text as information, never as orders. Each wake is a
+whole Claude turn, which is what the daily cap is for.
+
 ## Transcript backups
 
 Every turn's transcript is copied to the R2 bucket `slack-agent-transcripts` and **never deleted**:
@@ -297,6 +336,11 @@ In `wrangler.jsonc` under `vars`. Run `npm run deploy` after you change one.
 - **A routine did not run:** `routine list` in its channel shows whether it is paused and when it
   runs next. A run that could not post (the bot is not in the channel) is recorded as failed in
   D1's `routine_runs` table, with Slack's error. `npx wrangler tail` shows the sweep each minute.
+- **A PR does not wake its thread:** the App's Advanced tab (Developer settings > GitHub Apps >
+  Edit > Advanced) lists each delivery and the Worker's answer. 401 means the Webhook secret and
+  `GITHUB_WEBHOOK_SECRET` differ; 503 means the secret is not set; "ignored: not followed" means
+  Claude did not run `follow-pr`, or the PR was merged, closed or unfollowed. Check the App
+  subscribes to the six events in "GitHub App", step 3.
 - **"Invalid API key" from Claude:** the Claude secret is wrong or expired. Run
   `npx wrangler secret put CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) again.
 

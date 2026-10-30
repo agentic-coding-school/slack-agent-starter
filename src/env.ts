@@ -38,6 +38,11 @@ export interface Env {
   GITHUB_APP_ID: string
   GITHUB_APP_PRIVATE_KEY: string
   GITHUB_INSTALLATION_ID?: string
+  /**
+   * Checks GitHub's webhook deliveries (src/pr-follow.ts rule 2): the same string is the App's
+   * Webhook secret. Unset, the webhook refuses everything and no PR is ever followed.
+   */
+  GITHUB_WEBHOOK_SECRET?: string
   /** The memory repo, `owner/name` (a var in wrangler.jsonc). One folder per channel: src/memory.ts. */
   MEMORY_REPO: string
 

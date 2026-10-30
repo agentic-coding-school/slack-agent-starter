@@ -168,3 +168,54 @@ function derLength(n: number): number[] {
   }
   return [0x80 | bytes.length, ...bytes]
 }
+
+// ---------------------------------------------------------------------------------------------
+// Following PRs (src/pr-follow.ts). Read-only calls the Worker makes; the sandbox never sees these
+// tokens.
+
+/** Enough to read one repo's PRs. */
+export const READ_PULLS_PERMISSIONS = { pull_requests: 'read', metadata: 'read' } as const
+
+let botLoginCache: string | null = null
+
+/**
+ * Our App's bot user, `<app-slug>[bot]`: the author of every PR the bot opens. Asked of GitHub once
+ * per isolate (GET /app), so renaming the App needs no setting.
+ */
+export async function appBotLogin(env: Env, fetchImpl: typeof fetch = fetch): Promise<string> {
+  if (botLoginCache) return botLoginCache
+  const res = await fetchImpl('https://api.github.com/app', { headers: githubHeaders(await appJwt(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY)) })
+  if (!res.ok) throw new Error(`github app: ${res.status} ${await res.text()}`)
+  const slug = ((await res.json()) as { slug?: string }).slug
+  if (!slug) throw new Error('github app: no slug in the answer')
+  botLoginCache = `${slug}[bot]`
+  return botLoginCache
+}
+
+/** One PR, or null when GitHub has none (or the App cannot see the repo). */
+export async function getPull(env: Env, repo: string, number: number, fetchImpl: typeof fetch = fetch): Promise<Record<string, any> | null> {
+  const token = await mintInstallationToken(env, fetchImpl, { permissions: READ_PULLS_PERMISSIONS, repositories: [repo.split('/')[1]] }).catch(
+    (err) => {
+      // GitHub refuses a token for a repo the App is not installed on: that is "no such PR" to us.
+      if (/\b422\b|\b404\b/.test((err as Error).message)) return null
+      throw err
+    },
+  )
+  if (!token) return null
+  const res = await fetchImpl(`https://api.github.com/repos/${repo}/pulls/${number}`, { headers: githubHeaders(token) })
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`github pull: ${res.status} ${await res.text()}`)
+  return (await res.json()) as Record<string, any>
+}
+
+/** The numbers of the open PRs in `repo` whose head is commit `sha`. */
+export async function pullsForCommit(env: Env, repo: string, sha: string, fetchImpl: typeof fetch = fetch): Promise<number[]> {
+  const token = await mintInstallationToken(env, fetchImpl, { permissions: READ_PULLS_PERMISSIONS, repositories: [repo.split('/')[1]] })
+  const res = await fetchImpl(`https://api.github.com/repos/${repo}/commits/${sha}/pulls`, { headers: githubHeaders(token) })
+  if (!res.ok) throw new Error(`github commit pulls: ${res.status} ${await res.text()}`)
+  const pulls = (await res.json()) as Array<{ number?: number; state?: string; base?: { repo?: { full_name?: string } } }>
+  return pulls
+    .filter((p) => p.state === 'open' && String(p.base?.repo?.full_name ?? '').toLowerCase() === repo)
+    .map((p) => Number(p.number))
+    .filter((n) => Number.isSafeInteger(n) && n > 0)
+}

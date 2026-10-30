@@ -6,6 +6,10 @@
 //   node ~/.agent/tools.mjs search "<question or words>" [--limit 10]
 //   node ~/.agent/tools.mjs routine create --cron "0 9 * * 1" [--tz Europe/London] [--model sonnet] --prompt "What to do"
 //   node ~/.agent/tools.mjs routine list | pause <id> | resume <id> | delete <id>
+//   node ~/.agent/tools.mjs follow-pr <PR link> | unfollow-pr <PR link>
+//
+// follow-pr makes GitHub wake THIS thread when the PR's CI fails or a person reviews or comments on
+// it, until it is merged or closed. Only PRs this bot opened can be followed (src/pr-follow.ts).
 //
 // routine works on THIS channel's routines only: the Worker takes the channel from the token. Each
 // run posts a new thread in the channel and starts a turn there (src/routines.ts).
@@ -29,6 +33,8 @@ export const USAGE = [
   '  node ~/.agent/tools.mjs routine create --cron "0 9 * * 1" [--tz Europe/London] [--model sonnet] --prompt "What to do"',
   '  node ~/.agent/tools.mjs routine list',
   '  node ~/.agent/tools.mjs routine pause|resume|delete <id>',
+  '  node ~/.agent/tools.mjs follow-pr <PR link>',
+  '  node ~/.agent/tools.mjs unfollow-pr <PR link>',
 ].join('\n')
 
 const ROUTINE_FLAGS = { '--cron': 'cron', '--tz': 'timezone', '--model': 'model', '--prompt': 'prompt' }
@@ -71,6 +77,11 @@ function parseRoutine(rest) {
 export function parseArgs(argv) {
   const [command, ...rest] = argv
   if (command === 'routine') return parseRoutine(rest)
+  if (command === 'follow-pr' || command === 'unfollow-pr') {
+    // The Worker checks the link; here only its shape.
+    if (rest.length !== 1 || rest[0].startsWith('--')) return { error: `${command} takes one PR link, such as https://github.com/owner/repo/pull/12` }
+    return { command, pr: rest[0] }
+  }
   const flags = {}
   const positional = []
   for (let i = 0; i < rest.length; i++) {
@@ -161,6 +172,22 @@ export async function run(cmd, { env = process.env, fetchImpl = fetch } = {}) {
       ].join('\n')
     }
     return cmd.action === 'pause' ? `Paused routine ${r.id}.` : `Resumed routine ${r.id}. Next run: ${r.nextRun ?? 'never'}.`
+  }
+
+  if (cmd.command === 'follow-pr' || cmd.command === 'unfollow-pr') {
+    const action = cmd.command === 'follow-pr' ? 'follow' : 'unfollow'
+    const res = await fetchImpl(new URL('/sandbox/follow-pr', env.AGENT_API_URL), {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ turnId: env.TURN_ID, action, pr: cmd.pr }),
+    })
+    const out = await answer(res)
+    if (action === 'unfollow') return `Stopped following ${cmd.pr}. GitHub will not wake this thread for it any more.`
+    return [
+      `Following ${cmd.pr}. A failed check, a review or a comment from a person wakes this thread (at most 3 times a day);`,
+      'a merge or close ends it with a note.',
+      ...(out.webhook === false ? ['WARNING: the GitHub webhook secret is not set, so nothing will arrive yet. Say so in your reply.'] : []),
+    ].join(' ')
   }
 
   const res = await fetchImpl(new URL('/sandbox/canvas', env.AGENT_API_URL), {
