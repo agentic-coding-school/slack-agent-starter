@@ -141,7 +141,7 @@ if (!have.has('CALLBACK_SECRET')) putSecret('CALLBACK_SECRET', randomBytes(32).t
 
 const next = []
 if (workerUrl) {
-  writeFileSync('slack-manifest.local.json', readFileSync('slack-manifest.json', 'utf8').replace('https://YOUR-WORKER.workers.dev', workerUrl))
+  writeFileSync('slack-manifest.local.json', readFileSync('slack-manifest.json', 'utf8').replaceAll('https://YOUR-WORKER.workers.dev', workerUrl))
 }
 if (answers.SLACK_SIGNING_SECRET && answers.SLACK_BOT_TOKEN) {
   putSecret('SLACK_SIGNING_SECRET', answers.SLACK_SIGNING_SECRET)
