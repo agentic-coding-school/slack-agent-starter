@@ -13,22 +13,32 @@
 // the live status message in Slack) every few seconds, and the answer says whether someone pressed
 // Stop. On a stop it ends Claude and reports `stopped`, which is what frees the thread.
 //
+// The same answers hand over follow-ups sent in the thread while Claude works. The runner drops
+// them in the turn's inbox, and a Claude Code hook gives them to Claude at its next tool step
+// (inbox.mjs). The answer reports which ones Claude read, so the Worker knows they are covered.
+//
 // Env (set by the Worker for this turn only):
 //   TURN_ID, SESSION_ID, PROMPT_FILE, CALLBACK_URL, CALLBACK_TOKEN, TRANSCRIPT_URL, PROGRESS_URL,
 //   TURN_DEADLINE,
+//   AGENT_INBOX (optional; where follow-ups wait, default a per-turn folder in /tmp)
 //   CLAUDE_MODEL (the model id for --model)
 //   CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, and GH_TOKEN when GitHub is on.
 
 import { spawn } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { gzipSync } from 'node:zlib'
+import { deliver, hookSettings, READ_ACTIVITY, takenTs } from './inbox.mjs'
 import { createProgress, onStreamEvent, shouldSendStatus, TICK_MS } from './progress.mjs'
 
 const env = process.env
 // TURN_LOCK_FILE and PROGRESS_TICK_MS exist for the runner's tests only.
 const LOCK = env.TURN_LOCK_FILE || '/tmp/agent-turn.lock'
+// One folder per turn, so a follow-up handed to an older turn can never be read by this one.
+const INBOX = env.AGENT_INBOX || `/tmp/agent-inbox-${String(env.TURN_ID).replace(/[^\w-]/g, '')}`
+const INBOX_HOOK = join(dirname(fileURLToPath(import.meta.url)), 'inbox-hook.mjs')
 
 // The Worker only starts one turn per thread at a time, but a queue retry can start the same one
 // twice. A second runner must not touch the session: two `--resume` runs on one transcript break it.
@@ -80,6 +90,10 @@ try {
 } catch (err) {
   result = { ok: false, error: String(err?.message ?? err) }
 } finally {
+  // Which follow-ups Claude read. The Worker counts them as answered only if this turn answered.
+  const taken = takenTs(INBOX)
+  if (taken.length) result = { ...result, taken }
+  rmSync(INBOX, { recursive: true, force: true })
   // Still holding the lock, so no next turn is writing to the transcript while it is read. Only
   // the read happens here: the upload runs after the lock is freed, so the next turn is not refused.
   snapshot = snapshotTranscript()
@@ -96,6 +110,7 @@ async function runClaude() {
   // the ground truth, so a paused-and-resumed sandbox picks up exactly where it left off.
   const sessionFlag = sessionExists(env.SESSION_ID) ? '--resume' : '--session-id'
   mkdirSync(join(homedir(), 'work'), { recursive: true })
+  mkdirSync(INBOX, { recursive: true })
 
   const args = [
     '-p',
@@ -106,6 +121,8 @@ async function runClaude() {
     sessionFlag, env.SESSION_ID,
     // The thread's `!model` pick, mapped to an id by the Worker (src/models.ts).
     ...(env.CLAUDE_MODEL ? ['--model', env.CLAUDE_MODEL] : []),
+    // After every tool call, hand Claude any follow-up waiting in the inbox (inbox-hook.mjs).
+    '--settings', JSON.stringify(hookSettings(`"${process.execPath}" "${INBOX_HOOK}"`)),
   ]
 
   return await new Promise((resolve) => {
@@ -114,7 +131,7 @@ async function runClaude() {
     const { CALLBACK_TOKEN: _t, CALLBACK_URL: _u, TRANSCRIPT_URL: _x, PROGRESS_URL: _p, ...childEnv } = env
     const child = spawn('claude', args, {
       cwd: join(homedir(), 'work'),
-      env: childEnv,
+      env: { ...childEnv, AGENT_INBOX: INBOX },
       stdio: [openSync(env.PROMPT_FILE, 'r'), 'pipe', 'pipe'],
     })
 
@@ -129,11 +146,20 @@ async function runClaude() {
     let lastSentAt = 0
     let ticking = false
     let stopped = false
+    // Follow-ups written to the inbox so far, and how many Claude has read.
+    const written = new Set()
+    let readCount = 0
     const ticker = env.PROGRESS_URL ? setInterval(tick, Number(env.PROGRESS_TICK_MS) || TICK_MS) : null
 
     async function tick() {
       if (ticking || stopped) return
       ticking = true
+      const read = takenTs(INBOX).length
+      if (read > readCount) {
+        readCount = read
+        progress.activity = READ_ACTIVITY
+        version++
+      }
       const now = Date.now()
       const at = version
       const send = shouldSendStatus({ changed: at !== sentVersion, lastSentAt, now })
@@ -152,6 +178,7 @@ async function runClaude() {
           }
           const answer = await res.json().catch(() => ({}))
           if (answer?.stop) stop()
+          else if (answer?.messages?.length) deliver(INBOX, answer.messages, written)
         }
       } catch {
         // A missed tick costs one status edit; the next tick tries again.

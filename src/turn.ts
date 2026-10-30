@@ -21,6 +21,8 @@ export const DONE_EMOJI = 'white_check_mark'
 export const FAILED_EMOJI = 'x'
 export const QUEUED_EMOJI = 'hourglass_flowing_sand'
 export const STOPPED_EMOJI = 'octagonal_sign'
+/** A follow-up handed to the running turn (src/thread.ts rule 7), in place of the hourglass. */
+export const MIDTURN_EMOJI = 'incoming_envelope'
 
 /** How long the reply token outlives the turn limit, for a slow last upload. */
 const TOKEN_GRACE_MS = 10 * 60_000
@@ -38,8 +40,11 @@ export async function runTurnJob(env: Env, job: TurnJob, attempt: number, maxAtt
   const lastTs = turn.messages.at(-1)!.ts
   try {
     await react(env, channel, lastTs, WORKING_EMOJI)
-    // Messages that waited for this turn wore an hourglass; they are being read now.
-    await Promise.all(turn.messages.map((m) => react(env, channel, m.ts, null, QUEUED_EMOJI)))
+    // Messages that waited for this turn wore an hourglass, or an envelope if the last turn was
+    // handed them but did not answer them (rule 7); they are being read now.
+    await Promise.all(
+      turn.messages.flatMap((m) => [react(env, channel, m.ts, null, QUEUED_EMOJI), react(env, channel, m.ts, null, MIDTURN_EMOJI)]),
+    )
     await postStatus(env, job)
 
     const auth = claudeAuth(env)

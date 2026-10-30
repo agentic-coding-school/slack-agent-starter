@@ -2,7 +2,7 @@
  * The rules for one Slack thread, as plain functions over plain data so they can be tested
  * without Cloudflare. src/thread-state.ts stores the data and calls these.
  *
- * Five rules hold here:
+ * These rules hold here:
  *
  * 1. ONE TURN AT A TIME. Two `claude --resume` runs on one session write into the same transcript
  *    and break it for good. A message that arrives while a turn runs waits in `pending`, and the
@@ -19,6 +19,13 @@
  *    sees the mark on its next progress report, ends Claude and reports back, and THAT frees the
  *    thread. Freeing it at the click would let the next turn `--resume` the session while the
  *    stopped Claude may still be writing to it (rule 1).
+ * 7. A FOLLOW-UP CAN JOIN THE RUNNING TURN, AND IS NEVER LOST. A plain follow-up (no files, the
+ *    same model, nothing queued before it, no Stop pressed) goes into the running turn's `inbox`
+ *    instead of `pending`. The sandbox fetches it on its next progress report and Claude reads it at
+ *    its next tool step (box/inbox.mjs). It counts as answered ONLY when the sandbox says Claude
+ *    took it AND the turn ended with an answer. Every other case (not taken in time, the turn
+ *    failed, was stopped or was lost) puts it back in `pending`, so it runs as the next turn. A
+ *    race can cost a second answer; it can never cost a message.
  */
 
 import { describeModel, modelChoices, resolveModel, type ModelAlias, type ModelCommand } from './models.ts'
@@ -27,6 +34,8 @@ export interface SlackMessage {
   ts: string
   user: string
   text: string
+  /** The message carries files. It always waits for a turn of its own (rule 7). */
+  hasFiles?: boolean
 }
 
 export interface Turn {
@@ -70,6 +79,10 @@ export interface RunningTurn {
   statusTs?: string
   /** Who pressed Stop, once someone has (rule 6). */
   stopRequestedBy?: string
+  /** The model the turn runs on. A follow-up joins it only on the same model (rule 7). */
+  model?: ModelAlias
+  /** Follow-ups handed to this turn while it runs (rule 7), oldest first. */
+  inbox?: SlackMessage[]
 }
 
 /** How many message ids to remember for dedupe. Slack retries within minutes, not days. */
@@ -98,6 +111,7 @@ export function emptyThread(channel: string, threadTs: string, origin: string): 
 export type AcceptResult =
   | { action: 'skip'; reason: string }
   | { action: 'queued' }
+  | { action: 'midturn' }
   | { action: 'start'; turn: Turn }
 
 export function accept(data: ThreadData, msg: SlackMessage, opts: Clock & { mention: boolean }): AcceptResult {
@@ -109,11 +123,27 @@ export function accept(data: ThreadData, msg: SlackMessage, opts: Clock & { ment
   const firstTurn = !data.known || data.historyUnread === true
   data.known = true
 
+  if (data.running && canJoinRunningTurn(data, msg)) {
+    data.running.inbox = [...(data.running.inbox ?? []), msg]
+    return { action: 'midturn' }
+  }
   if (data.running || data.pausing) {
     data.pending.push(msg)
     return { action: 'queued' }
   }
   return { action: 'start', turn: begin(data, [msg], firstTurn, opts) }
+}
+
+/**
+ * Rule 7: may this follow-up go into the running turn? Files need a turn of their own (they are
+ * fetched when a turn starts), a Stop means the turn is ending, a message queued earlier must not
+ * be overtaken, and a `!model` change since the turn started applies from the next turn.
+ */
+export function canJoinRunningTurn(data: ThreadData, msg: SlackMessage): boolean {
+  const running = data.running
+  if (!running || running.stopRequestedBy || msg.hasFiles) return false
+  if (data.pending.length) return false
+  return running.model !== undefined && running.model === resolveModel(data.model)
 }
 
 export type ModelCommandResult = { action: 'skip'; reason: string } | { action: 'reply'; text: string }
@@ -167,25 +197,52 @@ export function abortStart(data: ThreadData, turn: Turn) {
  */
 export function requeue(data: ThreadData, turn: Turn) {
   if (data.running?.turnId !== turn.turnId) return
+  const { inbox } = data.running
   data.running = null
-  data.pending.unshift(...turn.messages)
+  data.pending.unshift(...turn.messages, ...(inbox ?? []))
 }
 
 export type FinishResult =
   | { accepted: false }
-  | { accepted: true; next: Turn | null; statusTs?: string; stoppedBy?: string }
+  | {
+      accepted: true
+      next: Turn | null
+      statusTs?: string
+      stoppedBy?: string
+      /** Follow-ups this turn read and answered (rule 7): they get a ✅ and no turn of their own. */
+      folded: SlackMessage[]
+    }
+
+/** How a turn ended. `taken` is the ts of every follow-up the sandbox says Claude read. */
+export interface Outcome {
+  answered: boolean
+  taken?: string[]
+}
 
 /**
  * The turn is over (answer delivered or start failed). Returns the next turn if messages waited,
- * and the finished turn's status message and Stop, for the caller to tidy up.
+ * and the finished turn's status message, Stop and folded follow-ups, for the caller to tidy up.
+ * Follow-ups the turn did not both read and answer go back in line first (rule 7).
  */
-export function finish(data: ThreadData, turnId: string, opts: Clock): FinishResult {
+export function finish(data: ThreadData, turnId: string, opts: Clock & Partial<Outcome>): FinishResult {
   const running = data.running
   if (running?.turnId !== turnId) return { accepted: false }
   data.running = null
   data.historyUnread = undefined
   data.lastActivityAt = opts.now
-  return { accepted: true, next: takePending(data, opts), statusTs: running.statusTs, stoppedBy: running.stopRequestedBy }
+  const { folded, returned } = settleInbox(running.inbox ?? [], { answered: opts.answered ?? false, taken: opts.taken })
+  data.pending.unshift(...returned)
+  return { accepted: true, next: takePending(data, opts), statusTs: running.statusTs, stoppedBy: running.stopRequestedBy, folded }
+}
+
+/**
+ * Rule 7 in one place: which follow-ups a finished turn answered, and which go back in line. Only
+ * ts the turn was actually handed count, whatever the sandbox claims.
+ */
+export function settleInbox(inbox: SlackMessage[], outcome: Outcome): { folded: SlackMessage[]; returned: SlackMessage[] } {
+  if (!outcome.answered) return { folded: [], returned: [...inbox] }
+  const taken = new Set(outcome.taken ?? [])
+  return { folded: inbox.filter((m) => taken.has(m.ts)), returned: inbox.filter((m) => !taken.has(m.ts)) }
 }
 
 /**
@@ -210,13 +267,17 @@ export function requestStop(data: ThreadData, turnId: string, user: string): Sto
 
 export type ProgressView =
   | { running: false }
-  | { running: true; startedAt: number; statusTs?: string; stop: boolean }
+  | { running: true; startedAt: number; statusTs?: string; stop: boolean; inbox: SlackMessage[] }
 
-/** What a progress report from the sandbox needs: is the turn still on, and should it stop. */
+/**
+ * What a progress report from the sandbox needs: is the turn still on, should it stop, and the
+ * follow-ups handed to it so far (rule 7). The whole inbox every time: the sandbox skips the ones
+ * it already has, so a lost answer costs a delay, never a message.
+ */
 export function progressView(data: ThreadData | undefined, turnId: string): ProgressView {
   if (data?.running?.turnId !== turnId) return { running: false }
-  const { startedAt, statusTs, stopRequestedBy } = data.running
-  return { running: true, startedAt, statusTs, stop: Boolean(stopRequestedBy) }
+  const { startedAt, statusTs, stopRequestedBy, inbox } = data.running
+  return { running: true, startedAt, statusTs, stop: Boolean(stopRequestedBy), inbox: stopRequestedBy ? [] : (inbox ?? []) }
 }
 
 export type AlarmResult =
@@ -238,9 +299,11 @@ export function onAlarm(data: ThreadData, opts: Clock & { maxTurnMs: number; idl
   if (data.running) {
     const deadline = data.running.startedAt + opts.maxTurnMs + LOST_TURN_MARGIN_MS
     if (opts.now < deadline) return { action: 'wait', until: deadline }
-    const { turnId: lostTurnId, statusTs: lostStatusTs } = data.running
+    const { turnId: lostTurnId, statusTs: lostStatusTs, inbox } = data.running
     data.running = null
     data.lastActivityAt = opts.now
+    // A lost turn answered nothing, so its follow-ups run next (rule 7).
+    data.pending.unshift(...(inbox ?? []))
     return { action: 'stale', lostTurnId, lostStatusTs, next: takePending(data, opts) }
   }
   if (data.pausing) return { action: 'none' }
@@ -273,7 +336,8 @@ function takePending(data: ThreadData, opts: Clock): Turn | null {
 
 function begin(data: ThreadData, messages: SlackMessage[], firstTurn: boolean, opts: Clock): Turn {
   const turnId = opts.newTurnId()
-  data.running = { turnId, startedAt: opts.now }
+  const model = resolveModel(data.model)
+  data.running = { turnId, startedAt: opts.now, model }
   data.parked = false
-  return { turnId, messages, firstTurn, startedAt: opts.now, model: resolveModel(data.model) }
+  return { turnId, messages, firstTurn, startedAt: opts.now, model }
 }

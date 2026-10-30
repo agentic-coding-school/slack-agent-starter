@@ -12,3 +12,11 @@ declare module '*/progress.mjs' {
   const text: string
   export default text
 }
+declare module '*/inbox.mjs' {
+  const text: string
+  export default text
+}
+declare module '*/inbox-hook.mjs' {
+  const text: string
+  export default text
+}

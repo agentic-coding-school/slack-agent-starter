@@ -3,6 +3,8 @@ import { Sandbox as ImpelloSandbox } from '@impello/sdk'
 import AGENT_INSTRUCTIONS from '../box/CLAUDE.md'
 import RUNNER from '../box/run-turn.mjs'
 import PROGRESS from '../box/progress.mjs'
+import INBOX from '../box/inbox.mjs'
+import INBOX_HOOK from '../box/inbox-hook.mjs'
 import { idlePauseMs, maxTurnMs, type Env } from './env.ts'
 
 /**
@@ -37,6 +39,9 @@ const AGENT_DIR = `${HOME}/.agent`
 export const RUNNER_PATH = `${AGENT_DIR}/run-turn.mjs`
 /** The runner imports this from beside itself. */
 const PROGRESS_PATH = `${AGENT_DIR}/progress.mjs`
+/** Mid-turn messages: the runner and the Claude Code hook it sets both import inbox.mjs. */
+const INBOX_PATH = `${AGENT_DIR}/inbox.mjs`
+const INBOX_HOOK_PATH = `${AGENT_DIR}/inbox-hook.mjs`
 const INSTRUCTIONS_PATH = `${HOME}/.claude/CLAUDE.md`
 
 /**
@@ -130,6 +135,8 @@ export async function launchTurn(env: Env, launch: Launch) {
   await sandbox.files.write([
     { path: RUNNER_PATH, data: RUNNER },
     { path: PROGRESS_PATH, data: PROGRESS },
+    { path: INBOX_PATH, data: INBOX },
+    { path: INBOX_HOOK_PATH, data: INBOX_HOOK },
     { path: INSTRUCTIONS_PATH, data: AGENT_INSTRUCTIONS },
     { path: promptPath, data: launch.prompt },
   ])

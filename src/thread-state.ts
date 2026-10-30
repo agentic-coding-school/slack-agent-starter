@@ -18,6 +18,7 @@ import {
   type AcceptResult,
   type FinishResult,
   type ModelCommandResult,
+  type Outcome,
   type ProgressView,
   type SlackMessage,
   type StopResult,
@@ -67,11 +68,14 @@ export class ThreadState extends DurableObject<Env> {
     await this.save(data)
   }
 
-  /** The turn is over. Starts the next turn if messages waited for this one. */
-  async finish(turnId: string): Promise<FinishResult> {
+  /**
+   * The turn is over. Starts the next turn if messages waited for this one, including follow-ups
+   * the turn was handed but did not both read and answer (rule 7).
+   */
+  async finish(turnId: string, outcome: Outcome = { answered: false }): Promise<FinishResult> {
     const data = await this.ctx.storage.get<ThreadData>('thread')
     if (!data) return { accepted: false }
-    const result = finish(data, turnId, this.clock())
+    const result = finish(data, turnId, { ...outcome, ...this.clock() })
     if (!result.accepted) return result
     await this.save(data)
     if (result.next) await this.start(result.next)
@@ -102,7 +106,7 @@ export class ThreadState extends DurableObject<Env> {
     return result
   }
 
-  /** Read-only: what a progress report from the sandbox needs to know. */
+  /** Read-only: what a progress report from the sandbox needs, follow-ups for the turn included. */
   async progress(turnId: string): Promise<ProgressView> {
     return progressView(await this.ctx.storage.get<ThreadData>('thread'), turnId)
   }

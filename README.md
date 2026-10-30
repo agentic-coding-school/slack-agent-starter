@@ -104,7 +104,16 @@ can only read and write code and pull requests.
   sandbox costs no compute and keeps its disk, so the next message in the thread resumes it in a
   few seconds with its history and files.
 - **One turn at a time.** Each thread has a Cloudflare Durable Object that lets one Claude turn run at a
-  time. Messages that arrive during a turn get an ⏳ and go into the next turn together.
+  time. A message with files that arrives during a turn gets an ⏳ and goes into the next turn.
+- **Follow-ups reach the running turn.** A plain follow-up sent while Claude works ("actually, use
+  the other branch") gets a 📨 instead. The sandbox picks it up on its next report to
+  `/sandbox/progress`, drops it in an inbox folder, and a Claude Code hook (`box/inbox-hook.mjs`,
+  PostToolUse) hands it to Claude after its next tool call. Claude covers it in the same reply, so
+  there is no second answer, and the status line shows "Read your new message". The follow-up gets
+  a ✅ only if Claude read it AND the turn answered. If the turn fails, is stopped or is lost, or
+  Claude never made another tool call, the follow-up runs as the next turn: a race can cost a
+  second answer, never a message. Follow-ups with files, after a Stop, behind a queued message, or
+  after a `!model` change wait for the next turn as before.
 - **Nothing waits for Claude.** The Worker starts Claude in the sandbox and returns. When Claude is
   done, the sandbox posts its answer back to `/sandbox/callback`. A turn can take as long as it needs
   (up to the limit), far longer than any Worker request.
@@ -127,7 +136,7 @@ can only read and write code and pull requests.
 | File | What it does |
 |---|---|
 | `src/index.ts` | The Slack events and interactivity routes, the sandbox doors, the queue consumer |
-| `src/thread.ts` | The thread rules: one turn at a time, dedupe, when to pause |
+| `src/thread.ts` | The thread rules: one turn at a time, dedupe, mid-turn follow-ups, when to pause |
 | `src/thread-state.ts` | The Durable Object that stores a thread and runs its alarm |
 | `src/turn.ts` | Starts one turn: prompt, tokens, launch |
 | `src/sandbox.ts` | E2B / Impello: find, create, pause, launch |
@@ -139,6 +148,7 @@ can only read and write code and pull requests.
 | `migrations/` | The D1 tables. `npm run setup` applies them |
 | `box/run-turn.mjs` | Runs inside the sandbox: runs Claude, reports progress, posts the answer back |
 | `box/progress.mjs` | Runs inside the sandbox: turns Claude's stream events into the status line |
+| `box/inbox.mjs`, `box/inbox-hook.mjs` | Runs inside the sandbox: follow-ups sent mid-turn, and the hook that hands them to Claude |
 | `box/CLAUDE.md` | The instructions Claude reads in the sandbox. Edit this to change the bot's behavior. |
 | `template/Dockerfile` | The sandbox image. Run `npm run template:build` after you change it. |
 

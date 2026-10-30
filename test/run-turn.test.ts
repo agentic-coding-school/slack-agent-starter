@@ -158,3 +158,96 @@ test('a Stop from the progress door ends Claude and reports the turn as stopped'
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('a follow-up from the progress door reaches Claude at its next tool step, and the answer says it was read', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'run-turn-'))
+  const home = join(dir, 'home')
+  const bin = join(dir, 'bin')
+  const prompt = join(dir, 'prompt.txt')
+  const inbox = join(dir, 'inbox')
+  mkdirSync(home, { recursive: true })
+  mkdirSync(bin)
+  // A Claude that makes a tool call, waits for a follow-up to land in the inbox, then (as Claude
+  // Code does after the next tool call) runs the PostToolUse hook it was given and answers with it.
+  writeFileSync(
+    join(bin, 'claude'),
+    `#!${process.execPath}
+const { execSync } = require('node:child_process')
+const { readdirSync } = require('node:fs')
+const settings = JSON.parse(process.argv[process.argv.indexOf('--settings') + 1])
+const hook = settings.hooks.PostToolUse[0].hooks[0].command
+console.log(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'make build' } }] } }))
+const started = Date.now()
+const wait = setInterval(() => {
+  const waiting = readdirSync(process.env.AGENT_INBOX).some((n) => n.endsWith('.json'))
+  if (!waiting && Date.now() - started < 8000) return
+  clearInterval(wait)
+  const out = execSync(hook, { encoding: 'utf8' })
+  const context = out ? JSON.parse(out).hookSpecificOutput.additionalContext : ''
+  // Stay alive past the next tick, so the status line shows the follow-up was read.
+  setTimeout(() => {
+    console.log(JSON.stringify({ type: 'result', is_error: false, result: 'done. ' + context, total_cost_usd: 0 }))
+  }, 600)
+}, 50)
+`,
+  )
+  chmodSync(join(bin, 'claude'), 0o755)
+  writeFileSync(prompt, 'hi')
+
+  const ticks: Array<Record<string, unknown>> = []
+  let callback: ((body: string) => void) | null = null
+  const delivered = new Promise<string>((resolve) => (callback = resolve))
+  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    let body = ''
+    req.on('data', (c) => (body += c))
+    req.on('end', () => {
+      if (req.url === '/sandbox/progress') {
+        ticks.push(JSON.parse(body))
+        // The Worker sends the whole inbox every time; the runner writes it once.
+        res.end(JSON.stringify({ ok: true, stop: false, messages: [{ ts: '200.1', user: 'U2', text: 'use the other branch' }] }))
+        return
+      }
+      res.end('{"ok":true}')
+      callback?.(body)
+    })
+  })
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+  const port = (server.address() as { port: number }).port
+
+  const child = spawn(process.execPath, [RUNNER], {
+    env: {
+      PATH: `${bin}:${process.env.PATH}`,
+      HOME: home,
+      TURN_ID: 'turn-1',
+      SESSION_ID: 'sess-1',
+      PROMPT_FILE: prompt,
+      CALLBACK_URL: `http://127.0.0.1:${port}/sandbox/callback`,
+      PROGRESS_URL: `http://127.0.0.1:${port}/sandbox/progress`,
+      PROGRESS_TICK_MS: '200',
+      CALLBACK_TOKEN: 'tok',
+      TURN_DEADLINE: String(Date.now() + 120_000),
+      TURN_LOCK_FILE: join(dir, 'agent-turn.lock'),
+      AGENT_INBOX: inbox,
+    },
+    stdio: 'ignore',
+  })
+
+  try {
+    const body = JSON.parse(
+      await Promise.race([
+        delivered,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('the turn never answered')), 15_000)),
+      ]),
+    )
+    assert.equal(body.ok, true)
+    assert.match(body.text, /<@U2>: use the other branch/)
+    assert.deepEqual(body.taken, ['200.1'])
+    assert.ok(ticks.some((t) => t.activity === ':incoming_envelope: Read your new message'), 'the status line shows the follow-up was read')
+    assert.equal(existsSync(inbox), false, 'the inbox is cleared after the turn')
+  } finally {
+    child.kill('SIGKILL')
+    server.closeAllConnections()
+    server.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

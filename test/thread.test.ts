@@ -14,6 +14,7 @@ import {
   requestStop,
   requeue,
   setStatus,
+  settleInbox,
   type ThreadData,
 } from '../src/thread.ts'
 
@@ -50,7 +51,8 @@ test('two messages at once give one running turn; the second waits and runs next
   const data = fresh()
   const newTurnId = ids()
   const first = accept(data, msg('100.0'), { mention: true, now: 1, newTurnId })
-  const second = accept(data, msg('100.5', 'and also'), { mention: true, now: 1, newTurnId })
+  // With files, so it cannot join the running turn (rule 7) and queues as before.
+  const second = accept(data, { ...msg('100.5', 'and also'), hasFiles: true }, { mention: true, now: 1, newTurnId })
   assert.equal(first.action, 'start')
   assert.deepEqual(second, { action: 'queued' })
 
@@ -99,7 +101,7 @@ test('a turn that never reports back is freed after its limit, and waiting messa
   const data = fresh()
   const newTurnId = ids()
   accept(data, msg('100.0'), { mention: true, now: 0, newTurnId })
-  accept(data, msg('100.5'), { mention: true, now: 10, newTurnId })
+  accept(data, { ...msg('100.5'), hasFiles: true }, { mention: true, now: 10, newTurnId })
   const r = onAlarm(data, { now: 1000 + LOST_TURN_MARGIN_MS, maxTurnMs: 1000, idlePauseMs: 100, newTurnId })
   assert.equal(r.action, 'stale')
   if (r.action === 'stale') {
@@ -159,7 +161,7 @@ test('a next turn that could not be queued goes back to pending, and the alarm s
   const data = fresh()
   const newTurnId = ids()
   accept(data, msg('100.0'), { mention: true, now: 0, newTurnId })
-  accept(data, msg('100.5'), { mention: true, now: 1, newTurnId })
+  accept(data, { ...msg('100.5'), hasFiles: true }, { mention: true, now: 1, newTurnId })
   const done = finish(data, 'turn-1', { now: 5, newTurnId })
   if (!done.accepted || !done.next) throw new Error('expected a next turn')
   requeue(data, done.next)
@@ -251,7 +253,7 @@ test('the status message is remembered on the running turn only', () => {
   accept(data, msg('100.0'), { mention: true, now: 1, newTurnId })
   assert.equal(setStatus(data, 'turn-1', '150.0'), true)
   assert.equal(setStatus(data, 'turn-9', '151.0'), false)
-  assert.deepEqual(progressView(data, 'turn-1'), { running: true, startedAt: 1, statusTs: '150.0', stop: false })
+  assert.deepEqual(progressView(data, 'turn-1'), { running: true, startedAt: 1, statusTs: '150.0', stop: false, inbox: [] })
   assert.deepEqual(progressView(data, 'turn-9'), { running: false })
   assert.deepEqual(progressView(undefined, 'turn-1'), { running: false })
   finish(data, 'turn-1', { now: 2, newTurnId })
@@ -267,9 +269,9 @@ test('Stop marks the running turn once and does not free the thread', () => {
   assert.deepEqual(requestStop(data, 'turn-1', 'U3'), { action: 'already-stopping' })
   assert.deepEqual(requestStop(data, 'turn-0', 'U2'), { action: 'not-running' })
   assert.equal(data.running?.turnId, 'turn-1')
-  assert.deepEqual(progressView(data, 'turn-1'), { running: true, startedAt: 1, statusTs: '150.0', stop: true })
+  assert.deepEqual(progressView(data, 'turn-1'), { running: true, startedAt: 1, statusTs: '150.0', stop: true, inbox: [] })
 
-  // A message sent meanwhile still waits for the stopped turn to report.
+  // A message sent meanwhile still waits for the stopped turn to report (rule 7: never mid-turn).
   assert.deepEqual(accept(data, msg('101.0'), { mention: false, now: 2, newTurnId }), { action: 'queued' })
   const done = finish(data, 'turn-1', { now: 3, newTurnId })
   assert.equal(done.accepted, true)
@@ -289,4 +291,121 @@ test('a lost turn hands back its status message for deleting', () => {
   const r = onAlarm(data, { maxTurnMs: 1000, idlePauseMs: 1000, now: 1000 + LOST_TURN_MARGIN_MS, newTurnId })
   assert.equal(r.action, 'stale')
   if (r.action === 'stale') assert.equal(r.lostStatusTs, '150.0')
+})
+
+// Rule 7: a plain follow-up joins the running turn, and is never lost.
+const midturnThread = () => {
+  const data = fresh()
+  const newTurnId = ids()
+  accept(data, msg('100.0'), { mention: true, now: 1, newTurnId })
+  return { data, newTurnId }
+}
+
+test('a plain follow-up during a turn goes into that turn, not the next one', () => {
+  const { data, newTurnId } = midturnThread()
+  assert.deepEqual(accept(data, msg('101.0', 'use the other branch'), { mention: false, now: 2, newTurnId }), { action: 'midturn' })
+  assert.deepEqual(data.pending, [])
+  const view = progressView(data, 'turn-1')
+  assert.equal(view.running && view.inbox.map((m) => m.ts).join(), '101.0')
+  // A Slack retry of the same follow-up is still a duplicate.
+  assert.deepEqual(accept(data, msg('101.0'), { mention: false, now: 3, newTurnId }), { action: 'skip', reason: 'duplicate' })
+})
+
+test('a follow-up the answered turn read is folded: no turn of its own', () => {
+  const { data, newTurnId } = midturnThread()
+  accept(data, msg('101.0'), { mention: false, now: 2, newTurnId })
+  const done = finish(data, 'turn-1', { now: 3, newTurnId, answered: true, taken: ['101.0'] })
+  assert.equal(done.accepted, true)
+  if (!done.accepted) return
+  assert.deepEqual(done.folded.map((m) => m.ts), ['101.0'])
+  assert.equal(done.next, null)
+  assert.equal(data.running, null)
+})
+
+test('a follow-up Claude never read runs as the next turn', () => {
+  const { data, newTurnId } = midturnThread()
+  accept(data, msg('101.0'), { mention: false, now: 2, newTurnId })
+  const done = finish(data, 'turn-1', { now: 3, newTurnId, answered: true, taken: [] })
+  if (!done.accepted) throw new Error('expected accepted')
+  assert.deepEqual(done.folded, [])
+  assert.deepEqual(done.next?.messages.map((m) => m.ts), ['101.0'])
+})
+
+test('a failed or stopped turn answers none of its follow-ups, even ones it read', () => {
+  const { data, newTurnId } = midturnThread()
+  accept(data, msg('101.0'), { mention: false, now: 2, newTurnId })
+  const done = finish(data, 'turn-1', { now: 3, newTurnId, answered: false, taken: ['101.0'] })
+  if (!done.accepted) throw new Error('expected accepted')
+  assert.deepEqual(done.folded, [])
+  assert.deepEqual(done.next?.messages.map((m) => m.ts), ['101.0'])
+})
+
+test('a finish with no outcome (a start that failed) returns the follow-ups', () => {
+  const { data, newTurnId } = midturnThread()
+  accept(data, msg('101.0'), { mention: false, now: 2, newTurnId })
+  const done = finish(data, 'turn-1', { now: 3, newTurnId })
+  if (!done.accepted) throw new Error('expected accepted')
+  assert.deepEqual(done.next?.messages.map((m) => m.ts), ['101.0'])
+})
+
+test('a lost turn hands its follow-ups to the next turn', () => {
+  const { data, newTurnId } = midturnThread()
+  accept(data, msg('101.0'), { mention: false, now: 2, newTurnId })
+  const r = onAlarm(data, { maxTurnMs: 1000, idlePauseMs: 100, now: 1 + 1000 + LOST_TURN_MARGIN_MS, newTurnId })
+  assert.equal(r.action, 'stale')
+  if (r.action === 'stale') assert.deepEqual(r.next?.messages.map((m) => m.ts), ['101.0'])
+})
+
+test('a turn that could not be queued keeps its follow-ups', () => {
+  const data = fresh()
+  const newTurnId = ids()
+  const r = accept(data, msg('100.0'), { mention: true, now: 1, newTurnId })
+  if (r.action !== 'start') throw new Error('expected a start')
+  accept(data, msg('101.0'), { mention: false, now: 2, newTurnId })
+  requeue(data, r.turn)
+  assert.deepEqual(data.pending.map((m) => m.ts), ['100.0', '101.0'])
+})
+
+test('the sandbox claiming a ts it was never handed folds nothing', () => {
+  const { data, newTurnId } = midturnThread()
+  accept(data, msg('101.0'), { mention: false, now: 2, newTurnId })
+  const done = finish(data, 'turn-1', { now: 3, newTurnId, answered: true, taken: ['100.0', '999.0'] })
+  if (!done.accepted) throw new Error('expected accepted')
+  assert.deepEqual(done.folded, [])
+  assert.deepEqual(done.next?.messages.map((m) => m.ts), ['101.0'])
+})
+
+test('files, a Stop, a queued message or a model change keep a follow-up out of the running turn', () => {
+  const files = midturnThread()
+  assert.deepEqual(accept(files.data, { ...msg('101.0'), hasFiles: true }, { mention: false, now: 2, newTurnId: files.newTurnId }), { action: 'queued' })
+  // Behind a queued message, a plain one queues too, so it cannot overtake it.
+  assert.deepEqual(accept(files.data, msg('102.0'), { mention: false, now: 3, newTurnId: files.newTurnId }), { action: 'queued' })
+  assert.deepEqual(files.data.pending.map((m) => m.ts), ['101.0', '102.0'])
+
+  const stopped = midturnThread()
+  requestStop(stopped.data, 'turn-1', 'U2')
+  assert.deepEqual(accept(stopped.data, msg('101.0'), { mention: false, now: 2, newTurnId: stopped.newTurnId }), { action: 'queued' })
+
+  const model = midturnThread()
+  applyModelCommand(model.data, msg('100.5', '!model haiku'), { kind: 'set', alias: 'haiku' }, { mention: false, now: 2 })
+  assert.deepEqual(accept(model.data, msg('101.0'), { mention: false, now: 3, newTurnId: model.newTurnId }), { action: 'queued' })
+})
+
+test('a Stop hides the inbox from the sandbox, and follow-ups already handed over run next', () => {
+  const { data, newTurnId } = midturnThread()
+  accept(data, msg('101.0'), { mention: false, now: 2, newTurnId })
+  requestStop(data, 'turn-1', 'U2')
+  const view = progressView(data, 'turn-1')
+  assert.equal(view.running && view.inbox.length, 0)
+  const done = finish(data, 'turn-1', { now: 3, newTurnId, answered: false })
+  if (!done.accepted) throw new Error('expected accepted')
+  assert.deepEqual(done.next?.messages.map((m) => m.ts), ['101.0'])
+})
+
+test('settleInbox keeps order and splits on taken', () => {
+  const inbox = [msg('1.0'), msg('2.0'), msg('3.0')]
+  const r = settleInbox(inbox, { answered: true, taken: ['3.0', '1.0'] })
+  assert.deepEqual(r.folded.map((m) => m.ts), ['1.0', '3.0'])
+  assert.deepEqual(r.returned.map((m) => m.ts), ['2.0'])
+  assert.deepEqual(settleInbox(inbox, { answered: false, taken: ['1.0'] }).returned.length, 3)
 })

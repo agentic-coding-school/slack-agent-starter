@@ -6,7 +6,7 @@ import { deleteMessage, postInThread, react, updateMessage, verifySlackSignature
 import { followUrl, parseStopClick, statusBlocks, statusLine } from './status.ts'
 import { threadStub } from './thread-state.ts'
 import { checkTranscriptSize, transcriptKey } from './transcripts.ts'
-import { DONE_EMOJI, FAILED_EMOJI, QUEUED_EMOJI, runTurnJob, STOPPED_EMOJI, WORKING_EMOJI, type TurnJob } from './turn.ts'
+import { DONE_EMOJI, FAILED_EMOJI, MIDTURN_EMOJI, QUEUED_EMOJI, runTurnJob, STOPPED_EMOJI, WORKING_EMOJI, type TurnJob } from './turn.ts'
 
 export { ThreadState } from './thread-state.ts'
 
@@ -18,6 +18,7 @@ export { ThreadState } from './thread-state.ts'
  *   POST /sandbox/callback  A sandbox delivering one turn's answer, with its one-turn token.
  *   POST /sandbox/transcript  A sandbox backing up its Claude transcript to R2, same token.
  *   POST /sandbox/progress  A sandbox saying what Claude is doing (the status message), same token.
+ *                           The answer says whether to stop, and hands over follow-ups sent mid-turn.
  *   queue                   Starts a turn in a sandbox (src/turn.ts).
  *
  * Plus the thread's alarm (src/thread-state.ts), which pauses quiet sandboxes.
@@ -60,6 +61,7 @@ interface SlackEvent {
   thread_ts?: string
   channel: string
   channel_type?: string
+  files?: unknown[]
 }
 
 async function slackEvents(request: Request, env: Env, ctx: ExecutionContext) {
@@ -95,7 +97,8 @@ async function slackEvents(request: Request, env: Env, ctx: ExecutionContext) {
 
   // In a DM every message is its own thread unless the user replies in one.
   const threadTs = event.thread_ts ?? event.ts
-  const msg = { ts: event.ts, user: event.user, text: stripMention(event.text ?? '', botUserId) }
+  const hasFiles = Boolean(event.files?.length) || event.subtype === 'file_share'
+  const msg = { ts: event.ts, user: event.user, text: stripMention(event.text ?? '', botUserId), ...(hasFiles ? { hasFiles } : {}) }
 
   const thread = threadStub(env, event.channel, threadTs)
 
@@ -122,6 +125,10 @@ async function slackEvents(request: Request, env: Env, ctx: ExecutionContext) {
   } else if (result.action === 'queued') {
     // Seen, and it joins the next turn once the current one finishes.
     ctx.waitUntil(react(env, event.channel, event.ts, QUEUED_EMOJI))
+  } else if (result.action === 'midturn') {
+    // Handed to the running turn: Claude reads it at its next tool step and covers it in the same
+    // reply (src/thread.ts rule 7). If it does not, it runs as the next turn.
+    ctx.waitUntil(react(env, event.channel, event.ts, MIDTURN_EMOJI))
   }
   return new Response('ok')
 }
@@ -134,6 +141,7 @@ async function sandboxCallback(request: Request, env: Env) {
     error?: string
     costUsd?: number
     stopped?: boolean
+    taken?: unknown
   } | null
   if (!body?.turnId) return Response.json({ ok: false, error: 'missing turnId' }, { status: 400 })
 
@@ -145,7 +153,9 @@ async function sandboxCallback(request: Request, env: Env) {
   // Claim the turn FIRST, in one call. Only the first callback for a turn gets past this, so a
   // retry can never post the answer twice. The cost: if Slack refuses the post below, the answer
   // is lost rather than retried, and the thread is told so.
-  const claim = await threadStub(env, channel, threadTs).finish(turnId)
+  // `taken` only says which follow-ups Claude read; the thread counts only ones it handed this turn.
+  const taken = Array.isArray(body.taken) ? body.taken.filter((t): t is string => typeof t === 'string').slice(0, 200) : []
+  const claim = await threadStub(env, channel, threadTs).finish(turnId, { answered: body.ok === true, taken })
   if (!claim.accepted) return Response.json({ ok: true, duplicate: true })
 
   const stopped = !body.ok && body.stopped === true
@@ -163,6 +173,8 @@ async function sandboxCallback(request: Request, env: Env) {
   // AFTER the answer, never before: deleting first would show a finished turn with no answer.
   if (claim.statusTs) await deleteMessage(env, channel, claim.statusTs)
   await react(env, channel, lastTs, body.ok ? DONE_EMOJI : stopped ? STOPPED_EMOJI : FAILED_EMOJI, WORKING_EMOJI)
+  // Follow-ups this answer covered get no reply of their own, just the tick.
+  await Promise.all(claim.folded.map((m) => react(env, channel, m.ts, DONE_EMOJI, MIDTURN_EMOJI)))
   console.log(`turn ${turnId} delivered ok=${body.ok} cost=${body.costUsd ?? '?'}`)
   return Response.json({ ok: true })
 }
@@ -186,6 +198,9 @@ async function sandboxProgress(request: Request, env: Env) {
   if (!view.running) return Response.json({ ok: true, stop: true })
   // Stopping: leave the "Stopping…" line alone and tell the sandbox.
   if (view.stop) return Response.json({ ok: true, stop: true })
+  // Follow-ups for this turn (rule 7 in src/thread.ts). They come from this thread's own records,
+  // so a sandbox only ever sees messages from its own thread.
+  const messages = view.inbox.map(({ ts, user, text }) => ({ ts, user, text }))
 
   if (view.statusTs && body.activity !== undefined) {
     const line = statusLine({
@@ -200,7 +215,7 @@ async function sandboxProgress(request: Request, env: Env) {
       blocks: statusBlocks({ line, followUrl: followUrl(new URL(request.url).origin, channel, threadTs), turnId }),
     }).catch((err) => console.warn(`turn ${turnId}: could not update the status:`, err.message))
   }
-  return Response.json({ ok: true, stop: false })
+  return Response.json({ ok: true, stop: false, messages })
 }
 
 /**

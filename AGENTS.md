@@ -9,6 +9,10 @@ paste a secret into the chat; secrets go in `.env.setup`.
 - Run `npm test`, `npm run typecheck` and `npm run scan` before you commit.
 - `src/thread.ts` holds the thread rules as plain functions. Change the rules there and add a test in
   `test/thread.test.ts`; `src/thread-state.ts` only stores data and calls them.
+- Mid-turn follow-ups (rule 7 in `src/thread.ts`) are never lost: one counts as answered only when
+  the sandbox says Claude took it AND the turn answered; every other path puts it back in `pending`.
+  Keep it that way. The sandbox half is `box/inbox.mjs` + `box/inbox-hook.mjs` (`test/inbox.test.ts`,
+  and `test/run-turn.test.ts` runs it end to end).
 - Model aliases (`!model opus|sonnet|haiku`) and their ids live only in `src/models.ts`.
 - D1 tables are made by numbered SQL files in `migrations/`; add a new file, never edit an applied
   one. `npm run setup` applies them. Query through `src/db.ts`, always with bound `?` values.
@@ -22,5 +26,5 @@ paste a secret into the chat; secrets go in `.env.setup`.
 - Sandboxes pause on timeout, never kill: the Claude transcript lives on the sandbox's disk.
 - Secrets go in with `npx wrangler secret put`. Never commit `.dev.vars` or a key.
 - `box/` files are written into every sandbox on every turn (`run-turn.mjs` imports `progress.mjs`
-  from beside it; a new box file must be added to the write list in `src/sandbox.ts`). A change there reaches running threads
+  and `inbox.mjs` from beside it, and `inbox-hook.mjs` imports `inbox.mjs`; a new box file must be added to the write list in `src/sandbox.ts`). A change there reaches running threads
   on the next deploy; a change to `template/Dockerfile` needs `npm run template:build`.

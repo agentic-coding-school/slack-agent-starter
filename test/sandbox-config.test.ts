@@ -23,7 +23,7 @@ test('the Slack bot token is never handed to a sandbox', () => {
 test('Claude in the sandbox never gets the reply token', () => {
   const runner = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'box', 'run-turn.mjs'), 'utf8')
   assert.match(runner, /const { CALLBACK_TOKEN: _t, CALLBACK_URL: _u, TRANSCRIPT_URL: _x, PROGRESS_URL: _p, \.\.\.childEnv } = env/)
-  assert.match(runner, /env: childEnv,/)
+  assert.match(runner, /env: { \.\.\.childEnv, AGENT_INBOX: INBOX },/)
 })
 
 test('the runner passes the thread model to claude and backs up the transcript without delaying the answer', () => {
@@ -47,4 +47,12 @@ test('the sandbox gets the progress door and the helper the runner imports', () 
   assert.match(source, /{ path: PROGRESS_PATH, data: PROGRESS }/)
   const runner = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'box', 'run-turn.mjs'), 'utf8')
   assert.match(runner, /from '\.\/progress\.mjs'/)
+})
+
+test('the sandbox gets the inbox helper and hook for mid-turn messages', () => {
+  assert.match(source, /{ path: INBOX_PATH, data: INBOX }/)
+  assert.match(source, /{ path: INBOX_HOOK_PATH, data: INBOX_HOOK }/)
+  const runner = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'box', 'run-turn.mjs'), 'utf8')
+  assert.match(runner, /from '\.\/inbox\.mjs'/)
+  assert.match(runner, /'--settings', JSON\.stringify\(hookSettings\(/)
 })

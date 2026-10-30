@@ -84,6 +84,8 @@ downloaded `.pem` file) and run setup again with `--skip-template`. Remind them 
   what Claude is doing; the answer arrives in the thread and the status message goes away.
 - Ask them to try **Stop** on a longer task: the status turns to "Stopping…" and within about 10
   seconds the bot posts "Stopped".
+- Ask them to send a follow-up while a longer task runs ("also add a test"). It gets a 📨, the
+  status line soon says "Read your new message", and the one answer covers both. Nothing to set up.
 - If nothing happens, see "When something goes wrong" in the README.
 
 ## 8. Finish
