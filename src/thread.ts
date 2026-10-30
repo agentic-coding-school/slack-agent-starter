@@ -15,6 +15,10 @@
  *    started would freeze that turn mid-run, so messages wait until the pause is done.
  * 5. A MODEL PICK IS NOT A TURN. `!model sonnet` sets the thread's model and gets a short reply;
  *    it never starts Claude. A running turn keeps its model; the pick applies from the next turn.
+ * 6. STOP IS A REQUEST, NOT A RELEASE. The Stop button only marks the running turn; the sandbox
+ *    sees the mark on its next progress report, ends Claude and reports back, and THAT frees the
+ *    thread. Freeing it at the click would let the next turn `--resume` the session while the
+ *    stopped Claude may still be writing to it (rule 1).
  */
 
 import { describeModel, modelChoices, resolveModel, type ModelAlias, type ModelCommand } from './models.ts'
@@ -43,7 +47,7 @@ export interface ThreadData {
   origin: string
   known: boolean
   seen: string[]
-  running: { turnId: string; startedAt: number } | null
+  running: RunningTurn | null
   pending: SlackMessage[]
   lastActivityAt: number
   /** Set once the idle pause has been sent, so the alarm does not send it twice. */
@@ -57,6 +61,15 @@ export interface ThreadData {
    * still reads the earlier messages. Cleared once a turn finishes.
    */
   historyUnread?: boolean
+}
+
+export interface RunningTurn {
+  turnId: string
+  startedAt: number
+  /** The live status message (src/status.ts), once the turn's job has posted it. */
+  statusTs?: string
+  /** Who pressed Stop, once someone has (rule 6). */
+  stopRequestedBy?: string
 }
 
 /** How many message ids to remember for dedupe. Slack retries within minutes, not days. */
@@ -158,15 +171,52 @@ export function requeue(data: ThreadData, turn: Turn) {
   data.pending.unshift(...turn.messages)
 }
 
-export type FinishResult = { accepted: false } | { accepted: true; next: Turn | null }
+export type FinishResult =
+  | { accepted: false }
+  | { accepted: true; next: Turn | null; statusTs?: string; stoppedBy?: string }
 
-/** The turn is over (answer delivered or start failed). Returns the next turn if messages waited. */
+/**
+ * The turn is over (answer delivered or start failed). Returns the next turn if messages waited,
+ * and the finished turn's status message and Stop, for the caller to tidy up.
+ */
 export function finish(data: ThreadData, turnId: string, opts: Clock): FinishResult {
-  if (data.running?.turnId !== turnId) return { accepted: false }
+  const running = data.running
+  if (running?.turnId !== turnId) return { accepted: false }
   data.running = null
   data.historyUnread = undefined
   data.lastActivityAt = opts.now
-  return { accepted: true, next: takePending(data, opts) }
+  return { accepted: true, next: takePending(data, opts), statusTs: running.statusTs, stoppedBy: running.stopRequestedBy }
+}
+
+/**
+ * Remembers the running turn's status message. False when the turn is no longer running (it
+ * finished or was given up on while the message was being posted), so the caller deletes it.
+ */
+export function setStatus(data: ThreadData, turnId: string, statusTs: string): boolean {
+  if (data.running?.turnId !== turnId) return false
+  data.running.statusTs = statusTs
+  return true
+}
+
+export type StopResult = { action: 'stopping' } | { action: 'already-stopping' } | { action: 'not-running' }
+
+/** Someone pressed Stop on `turnId` (rule 6). Only the turn running now can be stopped. */
+export function requestStop(data: ThreadData, turnId: string, user: string): StopResult {
+  if (data.running?.turnId !== turnId) return { action: 'not-running' }
+  if (data.running.stopRequestedBy) return { action: 'already-stopping' }
+  data.running.stopRequestedBy = user
+  return { action: 'stopping' }
+}
+
+export type ProgressView =
+  | { running: false }
+  | { running: true; startedAt: number; statusTs?: string; stop: boolean }
+
+/** What a progress report from the sandbox needs: is the turn still on, and should it stop. */
+export function progressView(data: ThreadData | undefined, turnId: string): ProgressView {
+  if (data?.running?.turnId !== turnId) return { running: false }
+  const { startedAt, statusTs, stopRequestedBy } = data.running
+  return { running: true, startedAt, statusTs, stop: Boolean(stopRequestedBy) }
 }
 
 export type AlarmResult =
@@ -174,7 +224,7 @@ export type AlarmResult =
   | { action: 'wait'; until: number }
   | { action: 'pause' }
   | { action: 'start'; next: Turn }
-  | { action: 'stale'; lostTurnId: string; next: Turn | null }
+  | { action: 'stale'; lostTurnId: string; lostStatusTs?: string; next: Turn | null }
 
 /**
  * What the thread's alarm should do now.
@@ -188,10 +238,10 @@ export function onAlarm(data: ThreadData, opts: Clock & { maxTurnMs: number; idl
   if (data.running) {
     const deadline = data.running.startedAt + opts.maxTurnMs + LOST_TURN_MARGIN_MS
     if (opts.now < deadline) return { action: 'wait', until: deadline }
-    const lostTurnId = data.running.turnId
+    const { turnId: lostTurnId, statusTs: lostStatusTs } = data.running
     data.running = null
     data.lastActivityAt = opts.now
-    return { action: 'stale', lostTurnId, next: takePending(data, opts) }
+    return { action: 'stale', lostTurnId, lostStatusTs, next: takePending(data, opts) }
   }
   if (data.pausing) return { action: 'none' }
   const next = takePending(data, opts)

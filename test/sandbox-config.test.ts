@@ -22,7 +22,7 @@ test('the Slack bot token is never handed to a sandbox', () => {
 
 test('Claude in the sandbox never gets the reply token', () => {
   const runner = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'box', 'run-turn.mjs'), 'utf8')
-  assert.match(runner, /const { CALLBACK_TOKEN: _t, CALLBACK_URL: _u, TRANSCRIPT_URL: _x, \.\.\.childEnv } = env/)
+  assert.match(runner, /const { CALLBACK_TOKEN: _t, CALLBACK_URL: _u, TRANSCRIPT_URL: _x, PROGRESS_URL: _p, \.\.\.childEnv } = env/)
   assert.match(runner, /env: childEnv,/)
 })
 
@@ -40,4 +40,11 @@ test('the runner passes the thread model to claude and backs up the transcript w
 test('the sandbox gets the model and the transcript door', () => {
   assert.match(source, /TRANSCRIPT_URL: launch\.transcriptUrl/)
   assert.match(source, /CLAUDE_MODEL: launch\.model/)
+})
+
+test('the sandbox gets the progress door and the helper the runner imports', () => {
+  assert.match(source, /PROGRESS_URL: launch\.progressUrl/)
+  assert.match(source, /{ path: PROGRESS_PATH, data: PROGRESS }/)
+  const runner = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'box', 'run-turn.mjs'), 'utf8')
+  assert.match(runner, /from '\.\/progress\.mjs'/)
 })

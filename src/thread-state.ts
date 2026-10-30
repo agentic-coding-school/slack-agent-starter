@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers'
 import { idlePauseMs, maxTurnMs, type Env } from './env.ts'
 import { pauseThreadSandbox } from './sandbox.ts'
-import { postInThread } from './slack.ts'
+import { deleteMessage, postInThread } from './slack.ts'
 import {
   abortStart,
   accept,
@@ -11,11 +11,16 @@ import {
   finish,
   LOST_TURN_MARGIN_MS,
   onAlarm,
+  progressView,
   requeue,
+  requestStop,
+  setStatus,
   type AcceptResult,
   type FinishResult,
   type ModelCommandResult,
+  type ProgressView,
   type SlackMessage,
+  type StopResult,
   type ThreadData,
   type Turn,
 } from './thread.ts'
@@ -74,6 +79,34 @@ export class ThreadState extends DurableObject<Env> {
     return result
   }
 
+  /** The running turn's status message, if its job already posted one (a retried job reuses it). */
+  async statusOf(turnId: string): Promise<string | null> {
+    const data = await this.ctx.storage.get<ThreadData>('thread')
+    return data?.running?.turnId === turnId ? (data.running.statusTs ?? null) : null
+  }
+
+  /** Remembers the status message. False means the turn is over and the caller deletes it. */
+  async setStatus(turnId: string, statusTs: string): Promise<boolean> {
+    const data = await this.ctx.storage.get<ThreadData>('thread')
+    if (!data || !setStatus(data, turnId, statusTs)) return false
+    await this.save(data)
+    return true
+  }
+
+  /** The Stop button (rule 6). Marks the turn; the sandbox ends it on its next progress report. */
+  async requestStop(turnId: string, user: string): Promise<StopResult> {
+    const data = await this.ctx.storage.get<ThreadData>('thread')
+    if (!data) return { action: 'not-running' }
+    const result = requestStop(data, turnId, user)
+    if (result.action === 'stopping') await this.save(data)
+    return result
+  }
+
+  /** Read-only: what a progress report from the sandbox needs to know. */
+  async progress(turnId: string): Promise<ProgressView> {
+    return progressView(await this.ctx.storage.get<ThreadData>('thread'), turnId)
+  }
+
   async alarm() {
     const data = await this.ctx.storage.get<ThreadData>('thread')
     if (!data) return
@@ -95,6 +128,7 @@ export class ThreadState extends DurableObject<Env> {
         await postInThread(this.env, data.channel, data.threadTs, ':warning: My last run stopped without a reply. Send your message again to retry.').catch(
           (err) => console.error('could not post the lost-turn note:', err),
         )
+        if (result.lostStatusTs) await deleteMessage(this.env, data.channel, result.lostStatusTs)
         if (result.next) await this.start(result.next)
         break
       case 'pause': {

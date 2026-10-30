@@ -96,3 +96,20 @@ export async function threadHistory(env: Env, channel: string, threadTs: string,
     .slice(-limit)
     .map((m) => ({ ts: m.ts, user: m.user ?? (m.bot_id ? 'a bot' : 'unknown'), text: m.text ?? '' }))
 }
+
+/** Posts one message and returns its ts. */
+export async function postMessage(env: Env, args: { channel: string; thread_ts: string; text: string; blocks?: unknown[] }) {
+  const json = await slackApi(env, 'chat.postMessage', { ...args, unfurl_links: false })
+  return json.ts as string
+}
+
+export async function updateMessage(env: Env, args: { channel: string; ts: string; text: string; blocks?: unknown[] }) {
+  await slackApi(env, 'chat.update', args)
+}
+
+/** A status message is tidying, never worth failing anything over; a gone message is fine. */
+export async function deleteMessage(env: Env, channel: string, ts: string) {
+  await slackApi(env, 'chat.delete', { channel, ts }).catch((err) => {
+    if (!String(err?.message).includes('message_not_found')) console.warn(`could not delete ${ts}:`, err?.message ?? err)
+  })
+}

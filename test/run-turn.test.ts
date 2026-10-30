@@ -86,3 +86,75 @@ test('the answer is delivered and the lock freed while the transcript upload sti
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('a Stop from the progress door ends Claude and reports the turn as stopped', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'run-turn-'))
+  const home = join(dir, 'home')
+  const bin = join(dir, 'bin')
+  const prompt = join(dir, 'prompt.txt')
+  mkdirSync(home, { recursive: true })
+  mkdirSync(bin)
+  // A Claude that makes one tool call and then works for a long time.
+  const toolUse = JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'make build' } }] } })
+  writeFileSync(join(bin, 'claude'), `#!/bin/sh\necho '${toolUse}'\nexec sleep 30\n`)
+  chmodSync(join(bin, 'claude'), 0o755)
+  writeFileSync(prompt, 'hi')
+
+  const ticks: Array<Record<string, unknown>> = []
+  let callback: ((body: string) => void) | null = null
+  const delivered = new Promise<string>((resolve) => (callback = resolve))
+  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    let body = ''
+    req.on('data', (c) => (body += c))
+    req.on('end', () => {
+      if (req.url === '/sandbox/progress') {
+        const tick = JSON.parse(body)
+        ticks.push({ ...tick, auth: req.headers.authorization })
+        // Once the tool call has been shown, the next report learns someone pressed Stop.
+        const shown = ticks.findIndex((t) => t.steps === 1)
+        res.end(JSON.stringify({ ok: true, stop: shown !== -1 && ticks.length - 1 > shown }))
+        return
+      }
+      res.end('{"ok":true}')
+      callback?.(body)
+    })
+  })
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+  const port = (server.address() as { port: number }).port
+
+  const started = Date.now()
+  const child = spawn(process.execPath, [RUNNER], {
+    env: {
+      PATH: `${bin}:${process.env.PATH}`,
+      HOME: home,
+      TURN_ID: 'turn-1',
+      SESSION_ID: 'sess-1',
+      PROMPT_FILE: prompt,
+      CALLBACK_URL: `http://127.0.0.1:${port}/sandbox/callback`,
+      PROGRESS_URL: `http://127.0.0.1:${port}/sandbox/progress`,
+      PROGRESS_TICK_MS: '200',
+      CALLBACK_TOKEN: 'tok',
+      TURN_DEADLINE: String(Date.now() + 120_000),
+      TURN_LOCK_FILE: join(dir, 'agent-turn.lock'),
+    },
+    stdio: 'ignore',
+  })
+
+  try {
+    const body = await Promise.race([
+      delivered,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('the stop never ended the turn')), 10_000)),
+    ])
+    assert.deepEqual(JSON.parse(body), { turnId: 'turn-1', ok: false, stopped: true, error: 'stopped' })
+    assert.ok(Date.now() - started < 10_000, 'stopped long before claude would have finished')
+    const shown = ticks.findIndex((t) => t.steps === 1)
+    assert.deepEqual(ticks[shown], { turnId: 'turn-1', activity: 'Running `make build`', steps: 1, auth: 'Bearer tok' })
+    // Nothing changed since, so the next tick only asks whether to stop.
+    assert.deepEqual(ticks[shown + 1], { turnId: 'turn-1', auth: 'Bearer tok' })
+  } finally {
+    child.kill('SIGKILL')
+    server.closeAllConnections()
+    server.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

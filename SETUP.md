@@ -67,7 +67,8 @@ Walk the human through it:
 
 Then run `npm run setup -- --file .env.setup --skip-template` again. After it finishes, the human
 opens **Event Subscriptions** in the Slack app and clicks **Retry** if the Request URL is not marked
-Verified.
+Verified. The manifest also turns on **Interactivity** with the Request URL `<worker>/slack/interactive`
+(it carries the Stop button's clicks); nothing to do there unless the Worker URL changes.
 
 ## 6. GitHub (optional)
 
@@ -79,7 +80,10 @@ downloaded `.pem` file) and run setup again with `--skip-template`. Remind them 
 
 - Ask the human to invite the bot to a channel (`/invite @percy-jr`) and @mention it with a question.
 - Run `npx wrangler tail --format pretty` while they do, and read it together. A 👀 on their message
-  means the turn started; the answer arrives in the thread.
+  means the turn started. A status message with a **Stop** button appears under it and updates with
+  what Claude is doing; the answer arrives in the thread and the status message goes away.
+- Ask them to try **Stop** on a longer task: the status turns to "Stopping…" and within about 10
+  seconds the bot posts "Stopped".
 - If nothing happens, see "When something goes wrong" in the README.
 
 ## 8. Finish

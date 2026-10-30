@@ -108,6 +108,14 @@ can only read and write code and pull requests.
 - **Nothing waits for Claude.** The Worker starts Claude in the sandbox and returns. When Claude is
   done, the sandbox posts its answer back to `/sandbox/callback`. A turn can take as long as it needs
   (up to the limit), far longer than any Worker request.
+- **You can watch it work, and stop it.** When a turn starts, the Worker posts a status message
+  under your message: what Claude is doing now (`Running npm test · 14 steps · 3m`), a **Follow
+  along** link to the turn's transcript page (`/ui/follow`, part of the web UI), and a **Stop**
+  button. The sandbox reports to `/sandbox/progress` every 10 seconds and the Worker edits the
+  message; the sandbox never holds the Slack token. Stop goes to `/slack/interactive` (signature
+  checked), which marks the turn; the sandbox sees the mark on its next report, ends Claude, and the
+  bot posts "Stopped". When the answer arrives it is a new message, and the status message is
+  deleted. Anyone who can see the thread can press Stop, as anyone can talk to the bot.
 - **Every turn is backed up.** After each turn the sandbox copies the thread's Claude transcript to
   an R2 bucket through `/sandbox/transcript`, using its one-turn token. The Worker picks the object
   key from the token (`transcripts/<channel>/<thread>/<turn>.jsonl.gz`), so a sandbox can only write
@@ -118,17 +126,19 @@ can only read and write code and pull requests.
 
 | File | What it does |
 |---|---|
-| `src/index.ts` | The Slack events route, the sandbox callback route, the queue consumer |
+| `src/index.ts` | The Slack events and interactivity routes, the sandbox doors, the queue consumer |
 | `src/thread.ts` | The thread rules: one turn at a time, dedupe, when to pause |
 | `src/thread-state.ts` | The Durable Object that stores a thread and runs its alarm |
 | `src/turn.ts` | Starts one turn: prompt, tokens, launch |
 | `src/sandbox.ts` | E2B / Impello: find, create, pause, launch |
 | `src/github.ts` | GitHub App tokens |
 | `src/models.ts` | The `!model` aliases and their model ids, in one place |
+| `src/status.ts` | The live status message and the Stop button: the line, its caps, reading a click |
 | `src/transcripts.ts` | The transcript backup rules: the R2 key, the size limit |
 | `src/db.ts` | The D1 database helpers |
 | `migrations/` | The D1 tables. `npm run setup` applies them |
-| `box/run-turn.mjs` | Runs inside the sandbox: runs Claude, posts the answer back |
+| `box/run-turn.mjs` | Runs inside the sandbox: runs Claude, reports progress, posts the answer back |
+| `box/progress.mjs` | Runs inside the sandbox: turns Claude's stream events into the status line |
 | `box/CLAUDE.md` | The instructions Claude reads in the sandbox. Edit this to change the bot's behavior. |
 | `template/Dockerfile` | The sandbox image. Run `npm run template:build` after you change it. |
 
@@ -163,6 +173,8 @@ In `wrangler.jsonc` under `vars`. Run `npm run deploy` after you change one.
   check that the Request URL is verified (click Retry), and that the bot is in the channel.
 - **👀 but no reply:** the turn failed to start or is still running. `npx wrangler tail` shows why.
   A turn that never reports back is released after its limit, with a note in the thread.
+- **Stop does nothing:** check that Interactivity is on in the Slack app with the Request URL
+  `<worker>/slack/interactive`. A click is seen by the sandbox on its next report (up to 10 seconds).
 - **"Invalid API key" from Claude:** the Claude secret is wrong or expired. Run
   `npx wrangler secret put CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) again.
 

@@ -2,6 +2,7 @@ import { Sandbox as E2BSandbox } from 'e2b'
 import { Sandbox as ImpelloSandbox } from '@impello/sdk'
 import AGENT_INSTRUCTIONS from '../box/CLAUDE.md'
 import RUNNER from '../box/run-turn.mjs'
+import PROGRESS from '../box/progress.mjs'
 import { idlePauseMs, maxTurnMs, type Env } from './env.ts'
 
 /**
@@ -34,6 +35,8 @@ export function provider(env: Pick<Env, 'SANDBOX_PROVIDER' | 'SANDBOX_API_KEY'>)
 const HOME = '/home/user'
 const AGENT_DIR = `${HOME}/.agent`
 export const RUNNER_PATH = `${AGENT_DIR}/run-turn.mjs`
+/** The runner imports this from beside itself. */
+const PROGRESS_PATH = `${AGENT_DIR}/progress.mjs`
 const INSTRUCTIONS_PATH = `${HOME}/.claude/CLAUDE.md`
 
 /**
@@ -103,6 +106,8 @@ export interface Launch {
   callbackToken: string
   /** Where run-turn.mjs uploads the transcript after the turn, with the same token. */
   transcriptUrl: string
+  /** Where run-turn.mjs reports what Claude is doing, and learns whether to stop. Same token. */
+  progressUrl: string
   /** The Claude model id for `claude --model`. */
   model: string
   claudeEnvs: Record<string, string>
@@ -124,6 +129,7 @@ export async function launchTurn(env: Env, launch: Launch) {
   // The prompt is untrusted Slack text: it goes in a file, never on a command line.
   await sandbox.files.write([
     { path: RUNNER_PATH, data: RUNNER },
+    { path: PROGRESS_PATH, data: PROGRESS },
     { path: INSTRUCTIONS_PATH, data: AGENT_INSTRUCTIONS },
     { path: promptPath, data: launch.prompt },
   ])
@@ -156,6 +162,7 @@ export async function launchTurn(env: Env, launch: Launch) {
       CALLBACK_URL: launch.callbackUrl,
       CALLBACK_TOKEN: launch.callbackToken,
       TRANSCRIPT_URL: launch.transcriptUrl,
+      PROGRESS_URL: launch.progressUrl,
       CLAUDE_MODEL: launch.model,
       TURN_DEADLINE: String(launch.deadline),
       SLACK_CHANNEL: launch.channel,

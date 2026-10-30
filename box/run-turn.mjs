@@ -9,8 +9,13 @@
 // (stored in R2) side by side. The upload never delays the answer or eats into the time report()
 // has to deliver it before the thread's lost-turn alarm, and a failed backup never fails the turn.
 //
+// While Claude runs, a ticker tells the Worker's /sandbox/progress door what Claude is doing (for
+// the live status message in Slack) every few seconds, and the answer says whether someone pressed
+// Stop. On a stop it ends Claude and reports `stopped`, which is what frees the thread.
+//
 // Env (set by the Worker for this turn only):
-//   TURN_ID, SESSION_ID, PROMPT_FILE, CALLBACK_URL, CALLBACK_TOKEN, TRANSCRIPT_URL, TURN_DEADLINE,
+//   TURN_ID, SESSION_ID, PROMPT_FILE, CALLBACK_URL, CALLBACK_TOKEN, TRANSCRIPT_URL, PROGRESS_URL,
+//   TURN_DEADLINE,
 //   CLAUDE_MODEL (the model id for --model)
 //   CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, and GH_TOKEN when GitHub is on.
 
@@ -19,9 +24,10 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
+import { createProgress, onStreamEvent, shouldSendStatus, TICK_MS } from './progress.mjs'
 
 const env = process.env
-// TURN_LOCK_FILE exists for the runner's tests only.
+// TURN_LOCK_FILE and PROGRESS_TICK_MS exist for the runner's tests only.
 const LOCK = env.TURN_LOCK_FILE || '/tmp/agent-turn.lock'
 
 // The Worker only starts one turn per thread at a time, but a queue retry can start the same one
@@ -105,7 +111,7 @@ async function runClaude() {
   return await new Promise((resolve) => {
     // Claude and every command it runs get the env WITHOUT the reply token: a prompt-injected
     // Claude must not be able to post its own "answer" and end the turn.
-    const { CALLBACK_TOKEN: _t, CALLBACK_URL: _u, TRANSCRIPT_URL: _x, ...childEnv } = env
+    const { CALLBACK_TOKEN: _t, CALLBACK_URL: _u, TRANSCRIPT_URL: _x, PROGRESS_URL: _p, ...childEnv } = env
     const child = spawn('claude', args, {
       cwd: join(homedir(), 'work'),
       env: childEnv,
@@ -115,6 +121,52 @@ async function runClaude() {
     let final = null
     let buffer = ''
     let stderrTail = ''
+
+    // The live status. `version` counts changes, so a tick knows whether it has news to send.
+    const progress = createProgress()
+    let version = 1
+    let sentVersion = 0
+    let lastSentAt = 0
+    let ticking = false
+    let stopped = false
+    const ticker = env.PROGRESS_URL ? setInterval(tick, Number(env.PROGRESS_TICK_MS) || TICK_MS) : null
+
+    async function tick() {
+      if (ticking || stopped) return
+      ticking = true
+      const now = Date.now()
+      const at = version
+      const send = shouldSendStatus({ changed: at !== sentVersion, lastSentAt, now })
+      try {
+        const res = await fetch(env.PROGRESS_URL, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${env.CALLBACK_TOKEN}` },
+          // Only what Claude is doing. The Worker reads the thread and the clock from its own records.
+          body: JSON.stringify({ turnId: env.TURN_ID, ...(send ? { activity: progress.activity, steps: progress.steps } : {}) }),
+          signal: AbortSignal.timeout(15_000),
+        })
+        if (res.ok) {
+          if (send) {
+            sentVersion = at
+            lastSentAt = now
+          }
+          const answer = await res.json().catch(() => ({}))
+          if (answer?.stop) stop()
+        }
+      } catch {
+        // A missed tick costs one status edit; the next tick tries again.
+      } finally {
+        ticking = false
+      }
+    }
+
+    // Someone pressed Stop. End Claude the same way the time limit does.
+    function stop() {
+      if (stopped) return
+      stopped = true
+      child.kill('SIGTERM')
+      setTimeout(() => child.kill('SIGKILL'), 10_000).unref()
+    }
     child.stdout.on('data', (chunk) => {
       buffer += chunk
       let i
@@ -125,6 +177,7 @@ async function runClaude() {
         try {
           const event = JSON.parse(line)
           if (event.type === 'result') final = event
+          if (onStreamEvent(progress, event)) version++
         } catch {
           // not JSON; ignore
         }
@@ -145,12 +198,15 @@ async function runClaude() {
 
     child.on('close', (code) => {
       clearTimeout(timer)
+      if (ticker) clearInterval(ticker)
       if (timedOut) {
         return resolve({ ok: false, error: 'the turn hit its time limit. Ask me to continue.' })
       }
+      // An answer that was already finished when Stop landed is still worth delivering.
       if (final && !final.is_error) {
         return resolve({ ok: true, text: final.result ?? '', costUsd: final.total_cost_usd })
       }
+      if (stopped) return resolve({ ok: false, stopped: true, error: 'stopped' })
       const detail = final?.result || stderrTail.trim() || `claude exited with code ${code}`
       resolve({ ok: false, error: detail.slice(0, 1500) })
     })

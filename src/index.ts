@@ -2,19 +2,22 @@ import { verifyCallbackToken } from './callback-token.ts'
 import { recordTranscript } from './db.ts'
 import type { Env } from './env.ts'
 import { parseModelCommand } from './models.ts'
-import { postInThread, react, verifySlackSignature } from './slack.ts'
+import { deleteMessage, postInThread, react, updateMessage, verifySlackSignature } from './slack.ts'
+import { followUrl, parseStopClick, statusBlocks, statusLine } from './status.ts'
 import { threadStub } from './thread-state.ts'
 import { checkTranscriptSize, transcriptKey } from './transcripts.ts'
-import { DONE_EMOJI, FAILED_EMOJI, QUEUED_EMOJI, runTurnJob, WORKING_EMOJI, type TurnJob } from './turn.ts'
+import { DONE_EMOJI, FAILED_EMOJI, QUEUED_EMOJI, runTurnJob, STOPPED_EMOJI, WORKING_EMOJI, type TurnJob } from './turn.ts'
 
 export { ThreadState } from './thread-state.ts'
 
 /**
- * Three ways in:
+ * The ways in:
  *
  *   POST /slack/events      Slack's Events API. Answers within Slack's 3 seconds and queues the work.
+ *   POST /slack/interactive Slack's button clicks: the Stop button on a running turn.
  *   POST /sandbox/callback  A sandbox delivering one turn's answer, with its one-turn token.
  *   POST /sandbox/transcript  A sandbox backing up its Claude transcript to R2, same token.
+ *   POST /sandbox/progress  A sandbox saying what Claude is doing (the status message), same token.
  *   queue                   Starts a turn in a sandbox (src/turn.ts).
  *
  * Plus the thread's alarm (src/thread-state.ts), which pauses quiet sandboxes.
@@ -23,7 +26,9 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
     if (request.method === 'POST' && url.pathname === '/slack/events') return slackEvents(request, env, ctx)
+    if (request.method === 'POST' && url.pathname === '/slack/interactive') return slackInteractive(request, env, ctx)
     if (request.method === 'POST' && url.pathname === '/sandbox/callback') return sandboxCallback(request, env)
+    if (request.method === 'POST' && url.pathname === '/sandbox/progress') return sandboxProgress(request, env)
     if (request.method === 'POST' && url.pathname === '/sandbox/transcript') return sandboxTranscript(request, env)
     if (url.pathname === '/') return new Response('slack-agent is running. Point Slack at /slack/events.\n')
     return new Response('not found', { status: 404 })
@@ -128,6 +133,7 @@ async function sandboxCallback(request: Request, env: Env) {
     text?: string
     error?: string
     costUsd?: number
+    stopped?: boolean
   } | null
   if (!body?.turnId) return Response.json({ ok: false, error: 'missing turnId' }, { status: 400 })
 
@@ -142,16 +148,108 @@ async function sandboxCallback(request: Request, env: Env) {
   const claim = await threadStub(env, channel, threadTs).finish(turnId)
   if (!claim.accepted) return Response.json({ ok: true, duplicate: true })
 
-  const text = body.ok ? body.text?.trim() || '_(no reply text)_' : `:x: The run failed: ${body.error ?? 'unknown error'}`
+  const stopped = !body.ok && body.stopped === true
+  const text = body.ok
+    ? body.text?.trim() || '_(no reply text)_'
+    : stopped
+      ? `:octagonal_sign: Stopped${claim.stoppedBy ? ` by <@${claim.stoppedBy}>` : ''}. Send a message to carry on.`
+      : `:x: The run failed: ${body.error ?? 'unknown error'}`
   try {
     await postInThread(env, channel, threadTs, text)
   } catch (err) {
     console.error(`turn ${turnId}: could not post the answer:`, err)
     await postInThread(env, channel, threadTs, ':warning: I finished, but Slack refused my answer. Ask me to send it again.').catch(() => {})
   }
-  await react(env, channel, lastTs, body.ok ? DONE_EMOJI : FAILED_EMOJI, WORKING_EMOJI)
+  // AFTER the answer, never before: deleting first would show a finished turn with no answer.
+  if (claim.statusTs) await deleteMessage(env, channel, claim.statusTs)
+  await react(env, channel, lastTs, body.ok ? DONE_EMOJI : stopped ? STOPPED_EMOJI : FAILED_EMOJI, WORKING_EMOJI)
   console.log(`turn ${turnId} delivered ok=${body.ok} cost=${body.costUsd ?? '?'}`)
   return Response.json({ ok: true })
+}
+
+/**
+ * A progress report from the sandbox: edits the turn's status message, and answers whether to stop.
+ * The thread, the status message and the clock come from the token and the thread's own records;
+ * the body only says what Claude is doing, and src/status.ts caps and escapes that.
+ */
+async function sandboxProgress(request: Request, env: Env) {
+  const body = (await request.json().catch(() => null)) as { turnId?: string; activity?: unknown; steps?: unknown } | null
+  if (!body?.turnId) return Response.json({ ok: false, error: 'missing turnId' }, { status: 400 })
+
+  const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
+  const verified = await verifyCallbackToken(env.CALLBACK_SECRET, token, body.turnId)
+  if (!verified.ok) return Response.json({ ok: false, error: verified.reason }, { status: 401 })
+
+  const { channel, threadTs, turnId } = verified.claims
+  const view = await threadStub(env, channel, threadTs).progress(turnId)
+  // The thread is done with this turn (finished, or given up on): nothing to show, so stop.
+  if (!view.running) return Response.json({ ok: true, stop: true })
+  // Stopping: leave the "Stopping…" line alone and tell the sandbox.
+  if (view.stop) return Response.json({ ok: true, stop: true })
+
+  if (view.statusTs && body.activity !== undefined) {
+    const line = statusLine({
+      activity: body.activity as string,
+      steps: typeof body.steps === 'number' ? body.steps : undefined,
+      elapsedMs: Date.now() - view.startedAt,
+    })
+    await updateMessage(env, {
+      channel,
+      ts: view.statusTs,
+      text: 'Working…',
+      blocks: statusBlocks({ line, followUrl: followUrl(new URL(request.url).origin, channel, threadTs), turnId }),
+    }).catch((err) => console.warn(`turn ${turnId}: could not update the status:`, err.message))
+  }
+  return Response.json({ ok: true, stop: false })
+}
+
+/**
+ * Slack's interactivity requests (button clicks), form-encoded with the JSON in `payload`. The one
+ * button is Stop (src/status.ts). It marks the turn (src/thread.ts rule 6) and the sandbox ends it
+ * on its next progress report. Anyone who can see the thread can press it, as anyone can talk to
+ * the bot.
+ */
+async function slackInteractive(request: Request, env: Env, ctx: ExecutionContext) {
+  const raw = await request.text()
+  const ok = await verifySlackSignature(
+    env.SLACK_SIGNING_SECRET,
+    raw,
+    request.headers.get('x-slack-request-timestamp'),
+    request.headers.get('x-slack-signature'),
+  )
+  if (!ok) return new Response('bad signature', { status: 401 })
+
+  let payload: unknown = null
+  try {
+    payload = JSON.parse(new URLSearchParams(raw).get('payload') ?? 'null')
+  } catch {
+    return new Response('bad payload', { status: 400 })
+  }
+  const click = parseStopClick(payload)
+  if (!click) return new Response('')
+
+  const result = await threadStub(env, click.channel, click.threadTs).requestStop(click.turnId, click.user)
+  if (result.action === 'stopping') {
+    // Drops the button in the same edit (chat.update keeps only the blocks it is sent).
+    const line = `:octagonal_sign: Stopping… (asked by <@${click.user}>)`
+    ctx.waitUntil(
+      updateMessage(env, {
+        channel: click.channel,
+        ts: click.messageTs,
+        text: 'Stopping…',
+        blocks: statusBlocks({ line, followUrl: followUrl(url(request), click.channel, click.threadTs), turnId: null }),
+      }).catch((err) => console.warn('could not show Stopping…:', err.message)),
+    )
+  } else if (result.action === 'not-running' && click.responseUrl) {
+    ctx.waitUntil(
+      fetch(click.responseUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ response_type: 'ephemeral', replace_original: false, text: 'That run has already finished.' }),
+      }).catch(() => {}),
+    )
+  }
+  return new Response('')
 }
 
 /**

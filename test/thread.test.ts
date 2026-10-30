@@ -1,7 +1,21 @@
 // I-3: one turn at a time per thread; each Slack message runs once; a thread starts with a mention.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { abortStart, accept, afterPause, applyModelCommand, emptyThread, finish, LOST_TURN_MARGIN_MS, onAlarm, requeue, type ThreadData } from '../src/thread.ts'
+import {
+  abortStart,
+  accept,
+  afterPause,
+  applyModelCommand,
+  emptyThread,
+  finish,
+  LOST_TURN_MARGIN_MS,
+  onAlarm,
+  progressView,
+  requestStop,
+  requeue,
+  setStatus,
+  type ThreadData,
+} from '../src/thread.ts'
 
 function ids() {
   let n = 0
@@ -228,4 +242,51 @@ test('`!model` with no name or an unknown name changes nothing', () => {
   const unknown = applyModelCommand(data, msg('100.1', '!model gpt'), { kind: 'unknown', given: 'gpt' }, { mention: true, now: 1 })
   assert.equal(unknown.action === 'reply' && /sonnet/.test(unknown.text), true)
   assert.equal(data.model, undefined)
+})
+
+// Rule 6: Stop marks the running turn; only the turn's own report frees the thread.
+test('the status message is remembered on the running turn only', () => {
+  const data = fresh()
+  const newTurnId = ids()
+  accept(data, msg('100.0'), { mention: true, now: 1, newTurnId })
+  assert.equal(setStatus(data, 'turn-1', '150.0'), true)
+  assert.equal(setStatus(data, 'turn-9', '151.0'), false)
+  assert.deepEqual(progressView(data, 'turn-1'), { running: true, startedAt: 1, statusTs: '150.0', stop: false })
+  assert.deepEqual(progressView(data, 'turn-9'), { running: false })
+  assert.deepEqual(progressView(undefined, 'turn-1'), { running: false })
+  finish(data, 'turn-1', { now: 2, newTurnId })
+  assert.equal(setStatus(data, 'turn-1', '152.0'), false, 'a status posted after the turn ended is not kept')
+})
+
+test('Stop marks the running turn once and does not free the thread', () => {
+  const data = fresh()
+  const newTurnId = ids()
+  accept(data, msg('100.0'), { mention: true, now: 1, newTurnId })
+  setStatus(data, 'turn-1', '150.0')
+  assert.deepEqual(requestStop(data, 'turn-1', 'U2'), { action: 'stopping' })
+  assert.deepEqual(requestStop(data, 'turn-1', 'U3'), { action: 'already-stopping' })
+  assert.deepEqual(requestStop(data, 'turn-0', 'U2'), { action: 'not-running' })
+  assert.equal(data.running?.turnId, 'turn-1')
+  assert.deepEqual(progressView(data, 'turn-1'), { running: true, startedAt: 1, statusTs: '150.0', stop: true })
+
+  // A message sent meanwhile still waits for the stopped turn to report.
+  assert.deepEqual(accept(data, msg('101.0'), { mention: false, now: 2, newTurnId }), { action: 'queued' })
+  const done = finish(data, 'turn-1', { now: 3, newTurnId })
+  assert.equal(done.accepted, true)
+  if (done.accepted) {
+    assert.equal(done.statusTs, '150.0')
+    assert.equal(done.stoppedBy, 'U2')
+    assert.equal(done.next?.turnId, 'turn-2')
+  }
+  assert.deepEqual(requestStop(data, 'turn-1', 'U2'), { action: 'not-running' })
+})
+
+test('a lost turn hands back its status message for deleting', () => {
+  const data = fresh()
+  const newTurnId = ids()
+  accept(data, msg('100.0'), { mention: true, now: 0, newTurnId })
+  setStatus(data, 'turn-1', '150.0')
+  const r = onAlarm(data, { maxTurnMs: 1000, idlePauseMs: 1000, now: 1000 + LOST_TURN_MARGIN_MS, newTurnId })
+  assert.equal(r.action, 'stale')
+  if (r.action === 'stale') assert.equal(r.lostStatusTs, '150.0')
 })

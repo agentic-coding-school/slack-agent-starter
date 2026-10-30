@@ -8,3 +8,7 @@ declare module '*/run-turn.mjs' {
   const text: string
   export default text
 }
+declare module '*/progress.mjs' {
+  const text: string
+  export default text
+}
