@@ -4,8 +4,10 @@
 // (src/sandbox.ts). It runs with no Worker waiting on it, so it must ALWAYS report back, even when
 // Claude crashes or runs out of time; otherwise the thread stays busy until its alarm gives up.
 //
-// After Claude stops, and before the answer goes back, it copies the thread's transcript to the
-// Worker's /sandbox/transcript door, which stores it in R2. A failed backup never fails the turn.
+// After Claude stops it reads the thread's transcript (still holding the turn lock), frees the lock,
+// then posts the answer and uploads the transcript copy to the Worker's /sandbox/transcript door
+// (stored in R2) side by side. The upload never delays the answer or eats into the time report()
+// has to deliver it before the thread's lost-turn alarm, and a failed backup never fails the turn.
 //
 // Env (set by the Worker for this turn only):
 //   TURN_ID, SESSION_ID, PROMPT_FILE, CALLBACK_URL, CALLBACK_TOKEN, TRANSCRIPT_URL, TURN_DEADLINE,
@@ -19,7 +21,8 @@ import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
 
 const env = process.env
-const LOCK = '/tmp/agent-turn.lock'
+// TURN_LOCK_FILE exists for the runner's tests only.
+const LOCK = env.TURN_LOCK_FILE || '/tmp/agent-turn.lock'
 
 // The Worker only starts one turn per thread at a time, but a queue retry can start the same one
 // twice. A second runner must not touch the session: two `--resume` runs on one transcript break it.
@@ -65,18 +68,22 @@ function isAlive(pid) {
 }
 
 let result = { ok: false, error: 'the run ended without a result' }
+let snapshot = null
 try {
   result = await runClaude()
 } catch (err) {
   result = { ok: false, error: String(err?.message ?? err) }
 } finally {
-  // Still holding the lock, so no next turn is writing to the transcript while it is read.
-  await backupTranscript()
+  // Still holding the lock, so no next turn is writing to the transcript while it is read. Only
+  // the read happens here: the upload runs after the lock is freed, so the next turn is not refused.
+  snapshot = snapshotTranscript()
   closeSync(lockFd)
   rmSync(LOCK, { force: true })
   rmSync(env.PROMPT_FILE, { force: true })
 }
-await report(result)
+// The answer goes first and never waits on the backup: report() needs all of the thread's
+// lost-turn margin (src/thread.ts LOST_TURN_MARGIN_MS) for its retries.
+await Promise.all([report(result), uploadTranscript(snapshot)])
 
 async function runClaude() {
   // First turn creates the session, every later turn resumes it. The transcript file on disk is
@@ -165,15 +172,24 @@ function transcriptPath(id) {
   return null
 }
 
-/**
- * Uploads the whole transcript, gzipped. The Worker picks the R2 key from the token, so this sends
- * only the bytes. A few quick tries, then it gives up: the answer matters more than the backup.
- */
-async function backupTranscript() {
+/** The whole transcript, gzipped, or null when there is none (or no door to send it to). */
+function snapshotTranscript() {
   try {
     const path = env.TRANSCRIPT_URL && transcriptPath(env.SESSION_ID)
-    if (!path) return
-    const body = gzipSync(readFileSync(path))
+    return path ? gzipSync(readFileSync(path)) : null
+  } catch (err) {
+    console.error('transcript backup failed:', err?.message ?? err)
+    return null
+  }
+}
+
+/**
+ * Uploads the snapshot. The Worker picks the R2 key from the token, so this sends only the bytes.
+ * A few quick tries, then it gives up: the answer matters more than the backup.
+ */
+async function uploadTranscript(body) {
+  if (!body) return
+  try {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         const res = await fetch(env.TRANSCRIPT_URL, {

@@ -26,12 +26,15 @@ test('Claude in the sandbox never gets the reply token', () => {
   assert.match(runner, /env: childEnv,/)
 })
 
-test('the runner passes the thread model to claude and backs up the transcript before it reports', () => {
+test('the runner passes the thread model to claude and backs up the transcript without delaying the answer', () => {
   const runner = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'box', 'run-turn.mjs'), 'utf8')
   assert.match(runner, /\['--model', env\.CLAUDE_MODEL\]/)
   // The upload sends no key or path: the Worker builds the key from the token.
   assert.match(runner, /'x-turn-id': env\.TURN_ID/)
-  assert.ok(runner.indexOf('await backupTranscript()') < runner.indexOf('await report(result)'))
+  // The transcript is read under the lock; the upload runs beside the answer, never before it
+  // (test/run-turn.test.ts runs the runner against a hanging upload).
+  assert.ok(runner.indexOf('snapshot = snapshotTranscript()') < runner.lastIndexOf('rmSync(LOCK, { force: true })'))
+  assert.match(runner, /await Promise\.all\(\[report\(result\), uploadTranscript\(snapshot\)\]\)/)
 })
 
 test('the sandbox gets the model and the transcript door', () => {
