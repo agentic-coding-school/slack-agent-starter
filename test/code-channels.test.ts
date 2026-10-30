@@ -62,6 +62,15 @@ function fakeDeps(answers: Record<string, (args: Record<string, unknown>) => unk
 
 const caller = { channel: 'C0PLAIN', threadTs: '1700000000.000100', author: 'U0ASKER' }
 
+/** C0CODE as Slack reports it when `caller`'s thread opened it. */
+const MINE_INFO = {
+  id: 'C0CODE',
+  properties: {
+    record_channel: { record_type: 'agent_channel', record_id: `AC:T1:${caller.channel}-${caller.threadTs}` },
+    agent_session: { origin_link: { channel_id: caller.channel, ts: caller.threadTs } },
+  },
+}
+
 // ---------------------------------------------------------------------------------------------
 // The action set (rule 1).
 
@@ -186,7 +195,7 @@ test('no code channel from inside a code channel, and an unreadable channel refu
 
 test('feature off: ONE note in the thread however often it is tried, and Claude is told to carry on', async () => {
   const { deps, posts } = fakeDeps({
-    'conversations.info': () => ({ channel: PLAIN_INFO }),
+    'conversations.info': (args) => ({ channel: args.channel === 'C0CODE' ? MINE_INFO : PLAIN_INFO }),
     'agents.conversations.create': () => 'feature_disabled',
     'agents.conversations.listViews': () => 'feature_disabled',
   })
@@ -206,45 +215,93 @@ test('feature off: ONE note in the thread however often it is tried, and Claude 
 })
 
 test('another Slack error is handed back as Slack’s code, with no note', async () => {
-  const { deps, posts } = fakeDeps({ 'agents.sessions.setStatus': () => 'not_agent_channel' })
+  const { deps, posts } = fakeDeps({ 'conversations.info': () => ({ channel: MINE_INFO }), 'agents.sessions.setStatus': () => 'not_agent_channel' })
   const out = await codeChannelAction(deps, caller, { action: 'status', channel: 'C0CODE', status: 'active' })
   assert.deepEqual(out, { status: 502, body: { ok: false, error: 'not_agent_channel' } })
   assert.equal(posts.length, 0)
 })
 
 test('post writes only where listViews answers: our own code channel', async () => {
-  const mine = fakeDeps({ 'agents.conversations.listViews': () => ({ views: [] }) })
+  const mine = fakeDeps({ 'conversations.info': () => ({ channel: MINE_INFO }), 'agents.conversations.listViews': () => ({ views: [] }) })
   const ok = await codeChannelAction(mine.deps, caller, { action: 'post', channel: 'C0CODE', text: 'build is green' })
   assert.equal(ok.status, 200)
   assert.deepEqual(mine.posts, [{ channel: 'C0CODE', text: 'build is green' }])
 
   const theirs = fakeDeps({ 'agents.conversations.listViews': () => 'not_agent_channel' })
-  const refused = await codeChannelAction(theirs.deps, caller, { action: 'post', channel: 'C0GENERAL', text: 'hi' })
+  const refused = await codeChannelAction(theirs.deps, { ...caller, channel: 'C0GENERAL' }, { action: 'post', channel: 'C0GENERAL', text: 'hi' })
   assert.equal(refused.status, 403)
   assert.equal(refused.body.error, 'not_your_code_channel')
   assert.equal(theirs.posts.length, 0)
 })
 
 test('view sends the checked tab; status sets the session', async () => {
-  const { deps, calls } = fakeDeps({ 'agents.conversations.setView': () => ({ view_id: 'V1' }), 'agents.sessions.setStatus': () => ({}) })
+  const { deps, calls } = fakeDeps({
+    'conversations.info': () => ({ channel: MINE_INFO }),
+    'agents.conversations.setView': () => ({ view_id: 'V1' }),
+    'agents.sessions.setStatus': () => ({}),
+  })
   const view = await codeChannelAction(deps, caller, { action: 'view', channel: 'C0CODE', view: { type: 'html', content: '<p/>', view_key: 'plan' } })
   assert.deepEqual(view.body, { ok: true, channel: 'C0CODE', view_id: 'V1', view_key: 'plan' })
-  assert.deepEqual(calls[0].args, { channel_id: 'C0CODE', type: 'html', content: '<p/>', view_key: 'plan' })
-  await codeChannelAction(deps, caller, { action: 'status', channel: 'C0CODE', status: 'suspended' })
-  assert.deepEqual(calls[1], { method: 'agents.sessions.setStatus', args: { channel_id: 'C0CODE', status: 'suspended' } })
+  const slackCalls = () => calls.filter((c) => c.method !== 'conversations.info')
+  assert.deepEqual(slackCalls()[0].args, { channel_id: 'C0CODE', type: 'html', content: '<p/>', view_key: 'plan' })
+  // A turn inside the code channel needs no lookup.
+  await codeChannelAction(deps, { channel: 'C0CODE', threadTs: '1.1' }, { action: 'status', channel: 'C0CODE', status: 'suspended' })
+  assert.deepEqual(slackCalls()[1], { method: 'agents.sessions.setStatus', args: { channel_id: 'C0CODE', status: 'suspended' } })
 })
 
-test('archive closes the session first, and is refused from inside the channel itself', async () => {
-  const { deps, calls } = fakeDeps({ 'agents.sessions.setStatus': () => ({}), 'agents.conversations.archive': () => ({}) })
+test('archive closes the session first from the opening thread, and is refused from inside the channel itself', async () => {
+  const { deps, calls } = fakeDeps({ 'conversations.info': () => ({ channel: MINE_INFO }), 'agents.sessions.setStatus': () => ({}), 'agents.conversations.archive': () => ({}) })
   const out = await codeChannelAction(deps, caller, { action: 'archive', channel: 'C0CODE' })
   assert.equal(out.status, 200)
-  assert.deepEqual(calls.map((c) => c.method), ['agents.sessions.setStatus', 'agents.conversations.archive'])
-  assert.equal(calls[0].args.status, 'closed')
+  assert.deepEqual(calls.map((c) => c.method), ['conversations.info', 'agents.sessions.setStatus', 'agents.conversations.archive'])
+  assert.equal(calls[1].args.status, 'closed')
 
   const inside = await codeChannelAction(deps, { ...caller, channel: 'C0CODE' }, { action: 'archive', channel: 'C0CODE' })
   assert.equal(inside.status, 403)
   assert.equal(inside.body.error, 'archive_from_inside')
-  assert.equal(calls.length, 2, 'nothing reached Slack')
+  assert.equal(calls.length, 3, 'nothing reached Slack')
+})
+
+test('a thread that did not open a code channel cannot archive, post into, tab or set the status of it (rule 8)', async () => {
+  // C0CODE was opened from C0ORIGIN/1792066248.979529, maybe a private channel; the caller is elsewhere.
+  const stranger = { channel: 'C0GENERAL', threadTs: '1700000000.000200' }
+  const sameChannelOtherThread = { channel: 'C0ORIGIN', threadTs: '1700000000.000300' }
+  for (const who of [stranger, sameChannelOtherThread]) {
+    const { deps, calls, posts } = fakeDeps({
+      'conversations.info': () => ({ channel: CODE_INFO }),
+      'agents.conversations.listViews': () => ({}),
+      'agents.conversations.setView': () => ({ view_id: 'V1' }),
+      'agents.sessions.setStatus': () => ({}),
+      'agents.conversations.archive': () => ({}),
+    })
+    for (const action of [
+      { action: 'archive', channel: 'C0CODE' },
+      { action: 'post', channel: 'C0CODE', text: 'hi' },
+      { action: 'view', channel: 'C0CODE', view: { type: 'html', content: '<p/>' } },
+      { action: 'status', channel: 'C0CODE', status: 'active' },
+    ] as const) {
+      const out = await codeChannelAction(deps, who, action as any)
+      assert.equal(out.status, 403, action.action)
+      assert.equal(out.body.error, 'not_your_code_channel', action.action)
+    }
+    assert.deepEqual(calls.map((c) => c.method).filter((m) => m !== 'conversations.info'), [], 'nothing but the lookup reached Slack')
+    assert.equal(posts.length, 0)
+  }
+
+  // The opening thread may.
+  const opener = fakeDeps({ 'conversations.info': () => ({ channel: CODE_INFO }), 'agents.sessions.setStatus': () => ({}), 'agents.conversations.archive': () => ({}) })
+  const done = await codeChannelAction(opener.deps, { channel: 'C0ORIGIN', threadTs: '1792066248.979529' }, { action: 'archive', channel: 'C0CODE' })
+  assert.equal(done.status, 200)
+
+  // A plain channel is not a code channel, and a channel Slack cannot describe refuses (fails closed).
+  const plain = fakeDeps({ 'conversations.info': () => ({ channel: PLAIN_INFO }), 'agents.conversations.archive': () => ({}) })
+  const notCode = await codeChannelAction(plain.deps, caller, { action: 'archive', channel: 'C0OTHER' })
+  assert.equal(notCode.body.error, 'not_a_code_channel')
+  const blind = fakeDeps({ 'conversations.info': () => 'ratelimited', 'agents.conversations.archive': () => ({}) })
+  const unread = await codeChannelAction(blind.deps, caller, { action: 'archive', channel: 'C0CODE' })
+  assert.equal(unread.status, 503)
+  assert.equal(unread.body.error, 'code_channel_lookup_failed')
+  assert.equal(blind.calls.some((c) => c.method === 'agents.conversations.archive'), false)
 })
 
 test('summary goes to the thread Slack says opened the channel, only from inside one', async () => {

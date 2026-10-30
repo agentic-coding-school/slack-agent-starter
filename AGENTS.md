@@ -70,7 +70,9 @@ paste a secret into the chat; secrets go in `.env.setup`.
   status, archive, summary); never add delete, kick or a generic Slack call. `create` takes its
   origin from the tools token and refuses from inside a code channel, reading the calling channel
   fresh with `conversations.info` and refusing when Slack cannot say (fail closed). `post` writes
-  only where `agents.conversations.listViews` answers. `summary` posts where Slack's record says the
+  only where `agents.conversations.listViews` answers. `post`, `view`, `status` and `archive` act on
+  the body's channel only when Slack's origin for it is the token's thread, or (not archive) the turn
+  runs inside it; the lookup fails closed. `summary` posts where Slack's record says the
   channel came from, never where the body says. The Context root Slack posts in a new code channel
   is dropped by `/slack/events` (`isContextRoot`), or a quoted @mention would start a turn. When
   Slack says the feature is off, the thread gets one note (`noteOnce`, rule 10 in `src/thread.ts`)

@@ -326,12 +326,15 @@ Claude has six actions and no others, through `/sandbox/code-channel` with its t
 | Action | What it does |
 |---|---|
 | `create "<name>"` | Opens a code channel linked to the calling thread, invites the person who asked, and posts its link in the thread |
-| `post <C…> "<text>"` | Posts in a code channel, only one this app is the agent of |
+| `post <C…> "<text>"` | Posts in a code channel, only one this app is the agent of, from the thread that opened it or from inside it |
 | `view <C…> <file>` | Sets a tab: `--type html`, `diff` or `block_kit`, `--name`, and `--key` to replace it later |
-| `status <C…> <status>` | `processing`, `active` or `suspended` |
+| `status <C…> <status>` | `processing`, `active` or `suspended` (`view` and `status`: from the opening thread or inside) |
 | `archive <C…>` | Closes the session and archives the channel, from the thread that opened it |
 | `summary "<text>"` | From a turn inside a code channel: posts into the thread Slack says opened it |
 
+- **Only the opener touches it.** `post`, `view`, `status` and `archive` read the channel from Slack
+  and act only when Slack says the calling thread opened it (or, except archive, the turn runs
+  inside it). A thread elsewhere cannot write into or archive another thread's code channel.
 - **No delete.** Nothing deletes a channel, a message or a tab, and nobody is removed.
 - **No code channel from a code channel.** Slack posts a "Context from #origin" message at the top
   of a new code channel that quotes the origin message, @mention included. The bot ignores that

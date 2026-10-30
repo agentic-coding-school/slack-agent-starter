@@ -67,7 +67,7 @@ follow there than in a thread.
 - `code-channel post <C…> "<text>"` posts in it. `code-channel view <C…> <file> --type
   html|diff|block_kit --name "Tab" --key <key>` sets a tab (the same `--key` replaces it; a
   block_kit file is a JSON array of blocks). `code-channel status <C…> processing|active|suspended`
-  sets its status.
+  sets its status. These work from the thread that opened the channel, or from inside it.
 - `code-channel archive <C…>` closes and archives it, from the thread that opened it.
 - When you run INSIDE a code channel, `code-channel summary "<text>"` posts a summary into the thread
   it was opened from. You cannot open another code channel from inside one.

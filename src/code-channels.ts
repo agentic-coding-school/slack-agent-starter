@@ -24,6 +24,11 @@
  *    so, and Claude is told to keep working in the thread.
  * 7. ARCHIVE FROM OUTSIDE. A turn inside the code channel cannot archive it: its own answer would
  *    then post into an archived channel. Archive it from the thread that opened it.
+ * 8. ONLY THE OPENER OR A TURN INSIDE TOUCHES IT. The channel in a post, view, status or archive
+ *    body is only a request. The door reads that channel from Slack and acts only when Slack's
+ *    origin for it is the token's thread, or (not for archive) the turn runs inside the channel.
+ *    A failed read refuses, as in rule 3. So a thread elsewhere cannot write into, or archive,
+ *    a code channel some other thread (maybe in a private channel) opened.
  */
 
 export type Checked<T> = { ok: true; value: T } | { ok: false; error: string }
