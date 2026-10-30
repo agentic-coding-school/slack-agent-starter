@@ -13,19 +13,48 @@ import { pipeline } from 'node:stream/promises'
 /** One file may take this long; a stuck download must not eat the turn. */
 const DOWNLOAD_TIMEOUT_MS = 5 * 60_000
 
+/** Claude keeps at least this much of the turn (or half of what is left, if less) after downloads. */
+const CLAUDE_RESERVE_MS = 5 * 60_000
+
+/** A file is not started with less time than this left: it would only time out. */
+const MIN_DOWNLOAD_MS = 5_000
+
+/** The status line in Slack while files come in. */
+export const DOWNLOAD_ACTIVITY = 'Downloading files…'
+
 /**
- * Downloads every granted file into `workDir`, one after another. Never throws: a file that fails
- * comes back with its `error`, so Claude can say so. Entries the Worker refused up front keep theirs.
+ * When the downloads must be done, for a turn ending at `turnDeadline`. Ten slow files at five
+ * minutes each would otherwise run past the turn's own deadline and into the thread's lost-turn alarm.
  */
-export async function downloadAll({ manifest, url, workDir, fetchImpl = fetch }) {
+export function downloadDeadline(turnDeadline, now) {
+  const left = Math.max(0, turnDeadline - now)
+  return turnDeadline - Math.min(CLAUDE_RESERVE_MS, Math.ceil(left / 2))
+}
+
+/**
+ * Downloads every granted file into `workDir`, one after another, all of them by `deadline` (epoch
+ * ms). Never throws: a file that fails, or is skipped for lack of time or a Stop (`signal`), comes
+ * back with its `error`, so Claude can say so. Entries the Worker refused up front keep theirs.
+ */
+export async function downloadAll({ manifest, url, workDir, fetchImpl = fetch, deadline = Infinity, signal, now = Date.now }) {
   const results = []
   for (const entry of Array.isArray(manifest) ? manifest : []) {
     if (!entry?.grant) {
       results.push({ name: String(entry?.name ?? 'file'), from: entry?.from, error: String(entry?.error ?? 'no grant') })
       continue
     }
+    const left = deadline - now()
+    if (signal?.aborted) {
+      results.push({ name: entry.name, from: entry.from, error: 'was not downloaded: the turn was stopped' })
+      continue
+    }
+    if (left < MIN_DOWNLOAD_MS) {
+      results.push({ name: entry.name, from: entry.from, error: 'was not downloaded: the turn ran out of time for downloads' })
+      continue
+    }
     try {
-      const size = await download(entry, { url, workDir, fetchImpl })
+      const timeout = AbortSignal.timeout(Math.floor(Math.min(DOWNLOAD_TIMEOUT_MS, left)))
+      const size = await download(entry, { url, workDir, fetchImpl, signal: signal ? AbortSignal.any([timeout, signal]) : timeout })
       results.push({ name: entry.name, from: entry.from, path: entry.path, size, mimetype: entry.mimetype })
     } catch (err) {
       results.push({ name: entry.name, from: entry.from, error: `could not be downloaded: ${String(err?.message ?? err).slice(0, 300)}` })
@@ -34,7 +63,7 @@ export async function downloadAll({ manifest, url, workDir, fetchImpl = fetch })
   return results
 }
 
-async function download(entry, { url, workDir, fetchImpl }) {
+async function download(entry, { url, workDir, fetchImpl, signal }) {
   // The path comes from the Worker, but a path must still never leave the work folder.
   const target = resolve(workDir, String(entry.path))
   if (!target.startsWith(resolve(workDir) + sep)) throw new Error('bad path')
@@ -42,7 +71,7 @@ async function download(entry, { url, workDir, fetchImpl }) {
 
   const res = await fetchImpl(url, {
     headers: { authorization: `Bearer ${entry.grant}` },
-    signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+    signal,
   })
   if (!res.ok || !res.body) {
     const detail = await res.text().catch(() => '')

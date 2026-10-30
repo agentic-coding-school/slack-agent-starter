@@ -32,7 +32,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { gzipSync } from 'node:zlib'
-import { downloadAll, filesNote } from './files.mjs'
+import { DOWNLOAD_ACTIVITY, downloadAll, downloadDeadline, filesNote } from './files.mjs'
 import { deliver, hookSettings, READ_ACTIVITY, takenTs } from './inbox.mjs'
 import { createProgress, onStreamEvent, shouldSendStatus, TICK_MS } from './progress.mjs'
 
@@ -115,7 +115,80 @@ async function runClaude() {
   const workDir = join(homedir(), 'work')
   mkdirSync(workDir, { recursive: true })
   mkdirSync(INBOX, { recursive: true })
-  await fetchFiles(workDir)
+
+  // The live status. `version` counts changes, so a tick knows whether it has news to send.
+  // It starts before the downloads, so Stop and the status work while files come in too.
+  const progress = createProgress()
+  progress.activity = env.FILES_MANIFEST && env.FILE_URL ? DOWNLOAD_ACTIVITY : progress.activity
+  let version = 1
+  let sentVersion = 0
+  let lastSentAt = 0
+  let ticking = false
+  let stopped = false
+  let child = null
+  const downloads = new AbortController()
+  // Follow-ups written to the inbox so far, and how many Claude has read.
+  const written = new Set()
+  let readCount = 0
+  const ticker = env.PROGRESS_URL ? setInterval(tick, Number(env.PROGRESS_TICK_MS) || TICK_MS) : null
+
+  async function tick() {
+    if (ticking || stopped) return
+    ticking = true
+    const read = takenTs(INBOX).length
+    if (read > readCount) {
+      readCount = read
+      progress.activity = READ_ACTIVITY
+      version++
+    }
+    const now = Date.now()
+    const at = version
+    const send = shouldSendStatus({ changed: at !== sentVersion, lastSentAt, now })
+    try {
+      const res = await fetch(env.PROGRESS_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${env.CALLBACK_TOKEN}` },
+        // Only what Claude is doing. The Worker reads the thread and the clock from its own records.
+        body: JSON.stringify({ turnId: env.TURN_ID, ...(send ? { activity: progress.activity, steps: progress.steps } : {}) }),
+        signal: AbortSignal.timeout(15_000),
+      })
+      if (res.ok) {
+        if (send) {
+          sentVersion = at
+          lastSentAt = now
+        }
+        const answer = await res.json().catch(() => ({}))
+        if (answer?.stop) stop()
+        else if (answer?.messages?.length) deliver(INBOX, answer.messages, written)
+      }
+    } catch {
+      // A missed tick costs one status edit; the next tick tries again.
+    } finally {
+      ticking = false
+    }
+  }
+
+  // Someone pressed Stop. End the downloads, or Claude the same way the time limit does.
+  function stop() {
+    if (stopped) return
+    stopped = true
+    downloads.abort()
+    if (!child) return
+    child.kill('SIGTERM')
+    setTimeout(() => child.kill('SIGKILL'), 10_000).unref()
+  }
+
+  // The deadline comes from the thread, which started counting when it accepted the message.
+  const deadline = Number(env.TURN_DEADLINE) || Date.now() + 45 * 60_000
+  await fetchFiles(workDir, { deadline: downloadDeadline(deadline, Date.now()), signal: downloads.signal })
+  if (stopped) {
+    if (ticker) clearInterval(ticker)
+    return { ok: false, stopped: true, error: 'stopped' }
+  }
+  if (progress.activity === DOWNLOAD_ACTIVITY) {
+    progress.activity = createProgress().activity
+    version++
+  }
 
   const args = [
     '-p',
@@ -134,7 +207,7 @@ async function runClaude() {
     // Claude and every command it runs get the env WITHOUT the reply token: a prompt-injected
     // Claude must not be able to post its own "answer" and end the turn.
     const { CALLBACK_TOKEN: _t, CALLBACK_URL: _u, TRANSCRIPT_URL: _x, PROGRESS_URL: _p, FILES_MANIFEST: _m, FILE_URL: _f, ...childEnv } = env
-    const child = spawn('claude', args, {
+    child = spawn('claude', args, {
       cwd: join(homedir(), 'work'),
       env: { ...childEnv, AGENT_INBOX: INBOX },
       stdio: [openSync(env.PROMPT_FILE, 'r'), 'pipe', 'pipe'],
@@ -144,61 +217,6 @@ async function runClaude() {
     let buffer = ''
     let stderrTail = ''
 
-    // The live status. `version` counts changes, so a tick knows whether it has news to send.
-    const progress = createProgress()
-    let version = 1
-    let sentVersion = 0
-    let lastSentAt = 0
-    let ticking = false
-    let stopped = false
-    // Follow-ups written to the inbox so far, and how many Claude has read.
-    const written = new Set()
-    let readCount = 0
-    const ticker = env.PROGRESS_URL ? setInterval(tick, Number(env.PROGRESS_TICK_MS) || TICK_MS) : null
-
-    async function tick() {
-      if (ticking || stopped) return
-      ticking = true
-      const read = takenTs(INBOX).length
-      if (read > readCount) {
-        readCount = read
-        progress.activity = READ_ACTIVITY
-        version++
-      }
-      const now = Date.now()
-      const at = version
-      const send = shouldSendStatus({ changed: at !== sentVersion, lastSentAt, now })
-      try {
-        const res = await fetch(env.PROGRESS_URL, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', authorization: `Bearer ${env.CALLBACK_TOKEN}` },
-          // Only what Claude is doing. The Worker reads the thread and the clock from its own records.
-          body: JSON.stringify({ turnId: env.TURN_ID, ...(send ? { activity: progress.activity, steps: progress.steps } : {}) }),
-          signal: AbortSignal.timeout(15_000),
-        })
-        if (res.ok) {
-          if (send) {
-            sentVersion = at
-            lastSentAt = now
-          }
-          const answer = await res.json().catch(() => ({}))
-          if (answer?.stop) stop()
-          else if (answer?.messages?.length) deliver(INBOX, answer.messages, written)
-        }
-      } catch {
-        // A missed tick costs one status edit; the next tick tries again.
-      } finally {
-        ticking = false
-      }
-    }
-
-    // Someone pressed Stop. End Claude the same way the time limit does.
-    function stop() {
-      if (stopped) return
-      stopped = true
-      child.kill('SIGTERM')
-      setTimeout(() => child.kill('SIGKILL'), 10_000).unref()
-    }
     child.stdout.on('data', (chunk) => {
       buffer += chunk
       let i
@@ -219,8 +237,7 @@ async function runClaude() {
       stderrTail = (stderrTail + chunk).slice(-2000)
     })
 
-    // The deadline comes from the thread, which started counting when it accepted the message.
-    const limit = Math.max(60_000, (Number(env.TURN_DEADLINE) || Date.now() + 45 * 60_000) - Date.now())
+    const limit = Math.max(60_000, deadline - Date.now())
     let timedOut = false
     const timer = setTimeout(() => {
       timedOut = true
@@ -250,7 +267,7 @@ async function runClaude() {
  * is missing) to the end of the prompt. The manifest goes as soon as it is read: its grants are for
  * the runner, not for Claude.
  */
-async function fetchFiles(workDir) {
+async function fetchFiles(workDir, { deadline, signal }) {
   if (!env.FILES_MANIFEST || !env.FILE_URL) return
   let manifest = []
   try {
@@ -260,7 +277,7 @@ async function fetchFiles(workDir) {
   } finally {
     rmSync(env.FILES_MANIFEST, { force: true })
   }
-  const results = await downloadAll({ manifest, url: env.FILE_URL, workDir })
+  const results = await downloadAll({ manifest, url: env.FILE_URL, workDir, deadline, signal })
   const note = filesNote(results)
   if (note) appendFileSync(env.PROMPT_FILE, `\n${note}\n`)
 }

@@ -251,3 +251,80 @@ const wait = setInterval(() => {
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('a Stop while files are still downloading ends the turn before Claude starts', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'run-turn-'))
+  const home = join(dir, 'home')
+  const bin = join(dir, 'bin')
+  const prompt = join(dir, 'prompt.txt')
+  const manifest = join(dir, 'manifest.json')
+  const ran = join(dir, 'claude-ran')
+  mkdirSync(home, { recursive: true })
+  mkdirSync(bin)
+  writeFileSync(join(bin, 'claude'), `#!/bin/sh\ntouch '${ran}'\necho '{"type":"result","is_error":false,"result":"hi"}'\n`)
+  chmodSync(join(bin, 'claude'), 0o755)
+  writeFileSync(prompt, 'hi')
+  writeFileSync(manifest, JSON.stringify([{ name: 'big.mov', path: 'slack-files/big.mov', grant: 'g1' }]))
+
+  const ticks: Array<Record<string, unknown>> = []
+  const hung: ServerResponse[] = []
+  let callback: ((body: string) => void) | null = null
+  const delivered = new Promise<string>((resolve) => (callback = resolve))
+  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    if (req.url === '/sandbox/file') {
+      // A file that takes far longer than the test.
+      res.writeHead(200)
+      res.write('a')
+      hung.push(res)
+      return
+    }
+    let body = ''
+    req.on('data', (c) => (body += c))
+    req.on('end', () => {
+      if (req.url === '/sandbox/progress') {
+        ticks.push(JSON.parse(body))
+        res.end(JSON.stringify({ ok: true, stop: ticks.length >= 2 }))
+        return
+      }
+      res.end('{"ok":true}')
+      callback?.(body)
+    })
+  })
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+  const port = (server.address() as { port: number }).port
+
+  const child = spawn(process.execPath, [RUNNER], {
+    env: {
+      PATH: `${bin}:${process.env.PATH}`,
+      HOME: home,
+      TURN_ID: 'turn-1',
+      SESSION_ID: 'sess-1',
+      PROMPT_FILE: prompt,
+      CALLBACK_URL: `http://127.0.0.1:${port}/sandbox/callback`,
+      PROGRESS_URL: `http://127.0.0.1:${port}/sandbox/progress`,
+      PROGRESS_TICK_MS: '200',
+      CALLBACK_TOKEN: 'tok',
+      TURN_DEADLINE: String(Date.now() + 120_000),
+      TURN_LOCK_FILE: join(dir, 'agent-turn.lock'),
+      FILES_MANIFEST: manifest,
+      FILE_URL: `http://127.0.0.1:${port}/sandbox/file`,
+    },
+    stdio: 'ignore',
+  })
+
+  try {
+    const body = await Promise.race([
+      delivered,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('the stop never ended the download')), 10_000)),
+    ])
+    assert.deepEqual(JSON.parse(body), { turnId: 'turn-1', ok: false, stopped: true, error: 'stopped' })
+    assert.equal(ticks[0].activity, 'Downloading files…', 'the status says what the turn is waiting on')
+    assert.equal(existsSync(ran), false, 'Claude never started')
+  } finally {
+    child.kill('SIGKILL')
+    for (const res of hung) res.destroy()
+    server.closeAllConnections()
+    server.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

@@ -8,7 +8,7 @@ import { test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const box = join(dirname(fileURLToPath(import.meta.url)), '..', 'box')
-const { downloadAll, filesNote } = await import(pathToFileURL(join(box, 'files.mjs')).href)
+const { downloadAll, downloadDeadline, filesNote } = await import(pathToFileURL(join(box, 'files.mjs')).href)
 const { parseArgs, run } = await import(pathToFileURL(join(box, 'tools.mjs')).href)
 
 async function withServer(handler: (req: IncomingMessage, res: ServerResponse) => void, body: (url: string) => Promise<void>) {
@@ -67,6 +67,81 @@ test('downloads each granted file, keeps refused ones with their reason, and nev
       assert.match(note, /- big\.mov from <@U2>: too large/)
     },
   )
+})
+
+test('downloads that would overrun the turn are cut short and the rest are skipped, not run past the deadline', async () => {
+  const work = mkdtempSync(join(tmpdir(), 'files-'))
+  const grants: string[] = []
+  const hung: ServerResponse[] = []
+  await withServer(
+    (req, res) => {
+      const grant = String(req.headers.authorization).replace('Bearer ', '')
+      grants.push(grant)
+      if (grant === 'g-fast') return res.end('ok')
+      // A slow file: the headers come, the bytes never finish.
+      res.writeHead(200, { 'x-file-size': '1000000' })
+      res.write('a')
+      hung.push(res)
+    },
+    async (url) => {
+      const started = Date.now()
+      const manifest = ['g-fast', 'g-slow', 'g-1', 'g-2', 'g-3', 'g-4', 'g-5', 'g-6', 'g-7', 'g-8'].map((grant, i) => ({
+        name: `${i}.bin`,
+        path: `slack-files/${i}.bin`,
+        grant,
+      }))
+      // Six seconds for all ten: the slow one gets what is left, not its own five minutes.
+      const results = await downloadAll({ url, workDir: work, manifest, deadline: started + 6_000 })
+      for (const res of hung) res.destroy()
+      const took = Date.now() - started
+      assert.ok(took < 7_500, `the downloads ended by the deadline (took ${took} ms)`)
+      assert.deepEqual(grants, ['g-fast', 'g-slow'], 'nothing is started once the time is gone')
+      assert.equal(results.length, 10, 'every file is accounted for')
+      assert.equal(results[0].path, 'slack-files/0.bin')
+      assert.match(results[1].error, /could not be downloaded/)
+      for (const r of results.slice(2)) assert.equal(r.error, 'was not downloaded: the turn ran out of time for downloads')
+      assert.deepEqual(readdirSync(join(work, 'slack-files')), ['0.bin'], 'no half file left behind')
+    },
+  )
+})
+
+test('a Stop ends the download in flight and skips the rest', async () => {
+  const work = mkdtempSync(join(tmpdir(), 'files-'))
+  const hung: ServerResponse[] = []
+  await withServer(
+    (_req, res) => {
+      res.writeHead(200)
+      res.write('a')
+      hung.push(res)
+    },
+    async (url) => {
+      const stop = new AbortController()
+      setTimeout(() => stop.abort(), 200)
+      const started = Date.now()
+      const results = await downloadAll({
+        url,
+        workDir: work,
+        signal: stop.signal,
+        manifest: [
+          { name: 'a', path: 'slack-files/a', grant: 'g1' },
+          { name: 'b', path: 'slack-files/b', grant: 'g2' },
+        ],
+      })
+      for (const res of hung) res.destroy()
+      assert.ok(Date.now() - started < 3_000)
+      assert.equal(hung.length, 1)
+      assert.match(results[0].error, /could not be downloaded/)
+      assert.equal(results[1].error, 'was not downloaded: the turn was stopped')
+    },
+  )
+})
+
+test('downloads leave Claude five minutes of the turn, or half of what is left', () => {
+  const minute = 60_000
+  assert.equal(downloadDeadline(45 * minute, 0), 40 * minute)
+  assert.equal(downloadDeadline(4 * minute, 0), 2 * minute)
+  assert.equal(downloadDeadline(minute, 2 * minute), minute, 'a deadline already gone leaves no time')
+  assert.ok(Number.isInteger(downloadDeadline(1_000_001, 0)), 'a whole number of ms, which timers require')
 })
 
 test('no files, no note', () => {
