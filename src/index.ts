@@ -2,6 +2,8 @@ import { verifyCallbackToken } from './callback-token.ts'
 import { recordTranscript } from './db.ts'
 import type { Env } from './env.ts'
 import { canvasLinkText, checkCanvas, checkUpload, downloadHeaders, filesFromEvent, fileSharedIn, hostedOutsideSlack, looksLikeSignInPage, MAX_FILE_BYTES, verifyFileGrant } from './files.ts'
+import { checkPush, MAX_TOTAL_BYTES } from './memory.ts'
+import { pullMemory, pushMemory } from './memory-store.ts'
 import { parseModelCommand } from './models.ts'
 import { checkSearch, normalise, publicOnly, resultsOf, searchArgs, searchErrorHint } from './search.ts'
 import { channelInfo, createCanvas, deleteMessage, fileInfo, postInThread, postMessage, react, slackApi, updateMessage, uploadToThread, verifySlackSignature } from './slack.ts'
@@ -21,6 +23,8 @@ export { ThreadState } from './thread-state.ts'
  *   POST /sandbox/transcript  A sandbox backing up its Claude transcript to R2, same token.
  *   POST /sandbox/progress  A sandbox saying what Claude is doing (the status message), same token.
  *                           The answer says whether to stop, and hands over follow-ups sent mid-turn.
+ *   GET  /sandbox/memory    A sandbox pulling its CHANNEL's memory notes before a turn, same token.
+ *   POST /sandbox/memory    A sandbox pushing what Claude changed in those notes after a turn.
  *   GET  /sandbox/file      A sandbox fetching one file sent in its thread, with that file's grant.
  *   POST /sandbox/upload    Claude posting a file into its own thread, with the turn's tools token.
  *   POST /sandbox/canvas    Claude posting a canvas into its own thread, same tools token.
@@ -37,6 +41,8 @@ export default {
     if (request.method === 'POST' && url.pathname === '/sandbox/callback') return sandboxCallback(request, env)
     if (request.method === 'POST' && url.pathname === '/sandbox/progress') return sandboxProgress(request, env)
     if (request.method === 'POST' && url.pathname === '/sandbox/transcript') return sandboxTranscript(request, env)
+    if (request.method === 'GET' && url.pathname === '/sandbox/memory') return sandboxMemoryPull(request, env)
+    if (request.method === 'POST' && url.pathname === '/sandbox/memory') return sandboxMemoryPush(request, env)
     if (request.method === 'GET' && url.pathname === '/sandbox/file') return sandboxFile(request, env)
     if (request.method === 'POST' && url.pathname === '/sandbox/upload') return sandboxUpload(request, env)
     if (request.method === 'POST' && url.pathname === '/sandbox/canvas') return sandboxCanvas(request, env)
@@ -402,6 +408,47 @@ async function sandboxSearch(request: Request, env: Env) {
   const { hits, dropped } = await publicOnly(resultsOf(json).map(normalise), (id) => channelInfo(env, id))
   if (dropped) console.warn(`turn ${turnId}: search dropped ${dropped} result(s) not from a public channel`)
   return Response.json({ ok: true, results: hits })
+}
+
+/**
+ * The channel's memory notes, for the runner (box/memory.mjs). The folder comes from the token's
+ * channel only (src/memory.ts), so a sandbox reads its own channel's notes and no one else's.
+ */
+async function sandboxMemoryPull(request: Request, env: Env) {
+  const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
+  const verified = await verifyCallbackToken(env.CALLBACK_SECRET, token, request.headers.get('x-turn-id') ?? '')
+  if (!verified.ok) return Response.json({ ok: false, error: verified.reason }, { status: 401 })
+  const { channel, turnId } = verified.claims
+  try {
+    const files = await pullMemory(env, channel)
+    return Response.json({ ok: true, files: files.map(({ path, content }) => ({ path, content })) })
+  } catch (err) {
+    console.error(`turn ${turnId}: memory pull failed:`, err)
+    return Response.json({ ok: false, error: (err as Error).message }, { status: 502 })
+  }
+}
+
+/** What Claude changed in its notes, committed to the token's channel folder (src/memory-store.ts). */
+async function sandboxMemoryPush(request: Request, env: Env) {
+  const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
+  const verified = await verifyCallbackToken(env.CALLBACK_SECRET, token, request.headers.get('x-turn-id') ?? '')
+  if (!verified.ok) return Response.json({ ok: false, error: verified.reason }, { status: 401 })
+  // JSON escaping can double the text, plus paths and shas; anything past that is not memory.
+  if (Number(request.headers.get('content-length') ?? 0) > 3 * MAX_TOTAL_BYTES) {
+    return Response.json({ ok: false, error: 'too large' }, { status: 413 })
+  }
+  const checked = checkPush(await request.json().catch(() => null))
+  if (!checked.ok) return Response.json({ ok: false, error: checked.error }, { status: 400 })
+
+  const { channel, threadTs, turnId } = verified.claims
+  try {
+    const commit = await pushMemory(env, { channel, threadTs, turnId }, checked.push)
+    console.log(`turn ${turnId}: memory ${commit ? `committed ${commit}` : 'unchanged'}`)
+    return Response.json({ ok: true, commit })
+  } catch (err) {
+    console.error(`turn ${turnId}: memory push failed:`, err)
+    return Response.json({ ok: false, error: (err as Error).message }, { status: 502 })
+  }
 }
 
 /**

@@ -17,7 +17,7 @@ paste a secret into the chat; secrets go in `.env.setup`.
 - D1 tables are made by numbered SQL files in `migrations/`; add a new file, never edit an applied
   one. `npm run setup` applies them. Query through `src/db.ts`, always with bound `?` values.
 - Every sandbox-to-Worker door (`/sandbox/callback`, `/sandbox/transcript`, `/sandbox/progress`,
-  `/sandbox/upload`, `/sandbox/canvas`, `/sandbox/search`, `/sandbox/file`) checks a signed token and builds every key,
+  `/sandbox/memory`, `/sandbox/upload`, `/sandbox/canvas`, `/sandbox/search`, `/sandbox/file`) checks a signed token and builds every key,
   channel and thread from the token's claims, never from the request body. Each token purpose signs
   with its own key (`src/callback-token.ts`): `reply` (the runner only; Claude never sees it),
   `tools` (Claude's, for upload, canvas and search), `file` (one grant per Slack file, `src/files.ts`). Text a sandbox sends for Slack is capped and escaped (`src/status.ts`).
@@ -35,3 +35,9 @@ paste a secret into the chat; secrets go in `.env.setup`.
   drops anything Slack does not call a public channel. Slack lets a bot token search only with the
   `action_token` from an @mention or DM event; the thread keeps it (rule 8 in `src/thread.ts`) and it
   never enters the sandbox. Never add a user token for search.
+- Memory (`src/memory.ts`, `src/memory-store.ts`, `box/memory.mjs`) is Claude Code's own auto memory
+  kept in the `MEMORY_REPO` git repo, one folder per channel. The Worker picks the folder from the
+  token's channel and commits through GitHub's API with a token for that repo only; the sandbox never
+  gets a token that reaches it (`mintTurnToken` in `src/github.ts` leaves it out). Keep both, or one
+  channel could read another's, private ones included. The GitHub App and `MEMORY_REPO` are required
+  (`githubMissing`). Do not add a memory skill or recall tool: auto memory already loads the index.

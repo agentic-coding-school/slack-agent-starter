@@ -7,6 +7,7 @@ import INBOX from '../box/inbox.mjs'
 import INBOX_HOOK from '../box/inbox-hook.mjs'
 import FILES from '../box/files.mjs'
 import TOOLS from '../box/tools.mjs'
+import MEMORY from '../box/memory.mjs'
 import type { ManifestEntry } from './files.ts'
 import { idlePauseMs, maxTurnMs, type Env } from './env.ts'
 
@@ -48,6 +49,8 @@ const INBOX_HOOK_PATH = `${AGENT_DIR}/inbox-hook.mjs`
 /** Files from Slack: the runner imports files.mjs. Claude runs tools.mjs to post files and canvases. */
 const FILES_PATH = `${AGENT_DIR}/files.mjs`
 export const TOOLS_PATH = `${AGENT_DIR}/tools.mjs`
+/** Memory: the runner imports memory.mjs to pull and push the channel's notes (src/memory.ts). */
+const MEMORY_PATH = `${AGENT_DIR}/memory.mjs`
 const INSTRUCTIONS_PATH = `${HOME}/.claude/CLAUDE.md`
 
 /**
@@ -119,6 +122,8 @@ export interface Launch {
   transcriptUrl: string
   /** Where run-turn.mjs reports what Claude is doing, and learns whether to stop. Same token. */
   progressUrl: string
+  /** Where run-turn.mjs pulls the channel's memory before the turn and pushes it after. Same token. */
+  memoryUrl: string
   /** The Worker's address. Claude's tools (box/tools.mjs) call its /sandbox/* doors. */
   origin: string
   /** Claude's own token for those doors: post a file or a canvas into this thread. */
@@ -153,6 +158,7 @@ export async function launchTurn(env: Env, launch: Launch) {
     { path: INBOX_HOOK_PATH, data: INBOX_HOOK },
     { path: FILES_PATH, data: FILES },
     { path: TOOLS_PATH, data: TOOLS },
+    { path: MEMORY_PATH, data: MEMORY },
     { path: INSTRUCTIONS_PATH, data: AGENT_INSTRUCTIONS },
     { path: promptPath, data: launch.prompt },
     ...(launch.files.length ? [{ path: manifestPath, data: JSON.stringify(launch.files) }] : []),
@@ -187,6 +193,7 @@ export async function launchTurn(env: Env, launch: Launch) {
       CALLBACK_TOKEN: launch.callbackToken,
       TRANSCRIPT_URL: launch.transcriptUrl,
       PROGRESS_URL: launch.progressUrl,
+      MEMORY_URL: launch.memoryUrl,
       ...(launch.files.length ? { FILES_MANIFEST: manifestPath, FILE_URL: new URL('/sandbox/file', launch.origin).toString() } : {}),
       // Claude keeps these two (the runner strips only the reply token); box/tools.mjs uses them.
       AGENT_API_URL: launch.origin,

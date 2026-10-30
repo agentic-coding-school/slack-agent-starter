@@ -22,7 +22,7 @@ test('the Slack bot token is never handed to a sandbox', () => {
 
 test('Claude in the sandbox never gets the reply token', () => {
   const runner = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'box', 'run-turn.mjs'), 'utf8')
-  assert.match(runner, /const { CALLBACK_TOKEN: _t, CALLBACK_URL: _u, TRANSCRIPT_URL: _x, PROGRESS_URL: _p, FILES_MANIFEST: _m, FILE_URL: _f, \.\.\.childEnv } = env/)
+  assert.match(runner, /const { CALLBACK_TOKEN: _t, CALLBACK_URL: _u, TRANSCRIPT_URL: _x, PROGRESS_URL: _p, FILES_MANIFEST: _m, FILE_URL: _f, MEMORY_URL: _y, \.\.\.childEnv } = env/)
   assert.match(runner, /env: { \.\.\.childEnv, AGENT_INBOX: INBOX },/)
 })
 
@@ -34,7 +34,7 @@ test('the runner passes the thread model to claude and backs up the transcript w
   // The transcript is read under the lock; the upload runs beside the answer, never before it
   // (test/run-turn.test.ts runs the runner against a hanging upload).
   assert.ok(runner.indexOf('snapshot = snapshotTranscript()') < runner.lastIndexOf('rmSync(LOCK, { force: true })'))
-  assert.match(runner, /await Promise\.all\(\[report\(result\), uploadTranscript\(snapshot\)\]\)/)
+  assert.match(runner, /await Promise\.all\(\[report\(result\), uploadTranscript\(snapshot\), pushMemory\(memorySnapshot\)\]\)/)
 })
 
 test('the sandbox gets the model and the transcript door', () => {
@@ -65,4 +65,21 @@ test('the sandbox gets the file helper and Claude gets its tools, with their own
   assert.match(runner, /from '\.\/files\.mjs'/)
   // The download grants are read and deleted before Claude starts.
   assert.ok(runner.indexOf('await fetchFiles(workDir)') < runner.indexOf("spawn('claude'"))
+})
+
+test('memory: the runner pulls before Claude, reads changes under the lock, and pushes beside the answer', () => {
+  assert.match(source, /{ path: MEMORY_PATH, data: MEMORY }/)
+  assert.match(source, /MEMORY_URL: launch\.memoryUrl/)
+  const runner = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'box', 'run-turn.mjs'), 'utf8')
+  assert.match(runner, /from '\.\/memory\.mjs'/)
+  assert.ok(runner.indexOf('await loadMemory()') < runner.indexOf("spawn('claude'"))
+  assert.ok(runner.indexOf('memorySnapshot = snapshotMemory()') < runner.lastIndexOf('rmSync(LOCK, { force: true })'))
+})
+
+test('memory: the sandbox never gets a token for the memory repo', () => {
+  const turn = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'turn.ts'), 'utf8')
+  // The turn's GitHub token is minted for every repo but the memory repo (src/github.ts).
+  assert.match(turn, /githubToken = await mintTurnToken\(env\)/)
+  assert.doesNotMatch(turn, /mintInstallationToken/)
+  assert.doesNotMatch(source, /MEMORY_REPO|mintInstallationToken/)
 })

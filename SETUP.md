@@ -37,8 +37,8 @@ Ask each one on its own, with these options, and wait for the answer.
 - Copy `.env.setup.example` to `.env.setup`.
 - Write the provider they picked into `SANDBOX_PROVIDER` (`e2b` or `impello`). That is not a secret.
 - Ask the human to open `.env.setup` in their editor and paste in `SANDBOX_API_KEY` and ONE of
-  `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`, then save it and tell you. Leave the Slack and
-  GitHub lines empty for now.
+  `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`, then save it and tell you. Leave the Slack, GitHub and
+  `MEMORY_REPO` lines empty for now.
 
 ## 4. Run setup
 
@@ -70,11 +70,18 @@ opens **Event Subscriptions** in the Slack app and clicks **Retry** if the Reque
 Verified. The manifest also turns on **Interactivity** with the Request URL `<worker>/slack/interactive`
 (it carries the Stop button's clicks); nothing to do there unless the Worker URL changes.
 
-## 6. GitHub (optional)
+## 6. GitHub and the memory repo (required)
 
-Ask whether they want the bot to open pull requests. If yes, walk them through "GitHub App" in the
-README, then have them fill in `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` (the path to the
-downloaded `.pem` file) and run setup again with `--skip-template`. Remind them to protect `main`.
+The bot keeps its memory in a private GitHub repo, so this step is not optional: a turn refuses to
+start until it is done. Walk the human through "GitHub App" in the README:
+
+1. They create a **private** repo for the memory (for example `my-bot-memory`) **with a README**.
+2. They create the GitHub App and install it on the memory repo and on any repos the bot may work in.
+3. They fill in `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH` (the path to the downloaded `.pem`
+   file) and `MEMORY_REPO` (`owner/name`, not a secret; you may write it yourself) in `.env.setup`.
+
+Then run setup again with `--skip-template`. Remind them to protect `main` in the repos the bot
+works in.
 
 ## 7. Test it
 
@@ -86,6 +93,9 @@ downloaded `.pem` file) and run setup again with `--skip-template`. Remind them 
   seconds the bot posts "Stopped".
 - Ask them to send a follow-up while a longer task runs ("also add a test"). It gets a 📨, the
   status line soon says "Read your new message", and the one answer covers both. Nothing to set up.
+- Ask them to tell the bot something worth keeping ("remember that we deploy with `npm run ship`"),
+  then ask about it in a NEW thread in the same channel. The memory repo shows a commit named for
+  the channel, and the new thread knows the answer.
 - If nothing happens, see "When something goes wrong" in the README.
 
 ## 8. Finish

@@ -28,3 +28,7 @@ declare module '*/tools.mjs' {
   const text: string
   export default text
 }
+declare module '*/memory.mjs' {
+  const text: string
+  export default text
+}

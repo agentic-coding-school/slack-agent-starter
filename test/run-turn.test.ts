@@ -7,6 +7,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { blobSha } from '../src/memory.ts'
 
 const RUNNER = join(dirname(fileURLToPath(import.meta.url)), '..', 'box', 'run-turn.mjs')
 
@@ -323,6 +324,84 @@ test('a Stop while files are still downloading ends the turn before Claude start
   } finally {
     child.kill('SIGKILL')
     for (const res of hung) res.destroy()
+    server.closeAllConnections()
+    server.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('memory: pulled before Claude, auto memory pointed at it, and the new note pushed with the answer', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'run-turn-'))
+  const home = join(dir, 'home')
+  const bin = join(dir, 'bin')
+  const prompt = join(dir, 'prompt.txt')
+  const memoryDir = join(dir, 'memory')
+  const settingsFile = join(home, '.claude', 'settings.json')
+  mkdirSync(home, { recursive: true })
+  mkdirSync(bin)
+  // A Claude that checks auto memory points at the pulled notes, then saves a new one.
+  writeFileSync(
+    join(bin, 'claude'),
+    `#!${process.execPath}
+const { readFileSync, writeFileSync } = require('node:fs')
+const settings = JSON.parse(readFileSync(${JSON.stringify(settingsFile)}, 'utf8'))
+const index = readFileSync(settings.autoMemoryDirectory + '/MEMORY.md', 'utf8')
+writeFileSync(settings.autoMemoryDirectory + '/gotcha.md', 'tests need TZ=UTC\\n')
+console.log(JSON.stringify({ type: 'result', is_error: false, result: 'enabled=' + settings.autoMemoryEnabled + ' ' + index.trim(), total_cost_usd: 0 }))
+`,
+  )
+  chmodSync(join(bin, 'claude'), 0o755)
+  writeFileSync(prompt, 'hi')
+
+  let answer = ''
+  let pushed: Record<string, unknown> | null = null
+  let done: () => void = () => {}
+  const finished = new Promise<void>((resolve) => (done = resolve))
+  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    let body = ''
+    req.on('data', (c) => (body += c))
+    req.on('end', () => {
+      if (req.url === '/sandbox/memory' && req.method === 'GET') {
+        assert.equal(req.headers.authorization, 'Bearer tok')
+        return res.end(JSON.stringify({ ok: true, files: [{ path: 'MEMORY.md', content: '- [Deploy](deploy.md)\n' }] }))
+      }
+      if (req.url === '/sandbox/memory') pushed = JSON.parse(body)
+      else answer = body
+      res.end('{"ok":true}')
+      if (answer && pushed) done()
+    })
+  })
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+  const port = (server.address() as { port: number }).port
+
+  const child = spawn(process.execPath, [RUNNER], {
+    env: {
+      PATH: `${bin}:${process.env.PATH}`,
+      HOME: home,
+      TURN_ID: 'turn-1',
+      SESSION_ID: 'sess-1',
+      PROMPT_FILE: prompt,
+      CALLBACK_URL: `http://127.0.0.1:${port}/sandbox/callback`,
+      MEMORY_URL: `http://127.0.0.1:${port}/sandbox/memory`,
+      MEMORY_DIR: memoryDir,
+      MEMORY_BASE_FILE: join(dir, 'memory-base.json'),
+      CALLBACK_TOKEN: 'tok',
+      TURN_DEADLINE: String(Date.now() + 120_000),
+      TURN_LOCK_FILE: join(dir, 'agent-turn.lock'),
+    },
+    stdio: 'ignore',
+  })
+
+  try {
+    await Promise.race([finished, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('no answer and push')), 10_000))])
+    assert.equal(JSON.parse(answer).text, 'enabled=true - [Deploy](deploy.md)')
+    assert.deepEqual(pushed, {
+      turnId: 'turn-1',
+      base: { 'MEMORY.md': await blobSha('- [Deploy](deploy.md)\n') },
+      changes: [{ path: 'gotcha.md', content: 'tests need TZ=UTC\n' }],
+    })
+  } finally {
+    child.kill('SIGKILL')
     server.closeAllConnections()
     server.close()
     rmSync(dir, { recursive: true, force: true })

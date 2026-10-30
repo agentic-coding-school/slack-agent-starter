@@ -1,7 +1,7 @@
 import { signCallbackToken } from './callback-token.ts'
 import { claudeAuth, maxTurnMs, type Env } from './env.ts'
 import { manifestFor } from './files.ts'
-import { githubConfigured, mintInstallationToken } from './github.ts'
+import { githubMissing, mintTurnToken } from './github.ts'
 import { buildPrompt, sessionIdFor } from './prompt.ts'
 import { modelId } from './models.ts'
 import { launchTurn } from './sandbox.ts'
@@ -50,17 +50,20 @@ export async function runTurnJob(env: Env, job: TurnJob, attempt: number, maxAtt
 
     const auth = claudeAuth(env)
     if ('missing' in auth) throw new Fatal(auth.missing)
+    // The GitHub App is required: memory lives in a repo only the App reaches.
+    const githubGaps = githubMissing(env)
+    if (githubGaps.length) throw new Fatal(githubGaps.join(' '))
 
     let githubToken: string | null = null
     let githubNote = ''
-    if (githubConfigured(env)) {
-      try {
-        githubToken = await mintInstallationToken(env)
-      } catch (err) {
-        // A broken GitHub setup costs the turn its GitHub access, not its answer.
-        console.error('github token mint failed:', err)
-        githubNote = `\n(GitHub access failed for this turn: ${(err as Error).message})`
-      }
+    try {
+      // Every repo but the memory repo, which the sandbox only reaches through the memory door.
+      githubToken = await mintTurnToken(env)
+      if (!githubToken) githubNote = '\n(The GitHub App is installed on the memory repo only, so this turn has no repos to work in.)'
+    } catch (err) {
+      // A broken GitHub setup costs the turn its GitHub access, not its answer.
+      console.error('github token mint failed:', err)
+      githubNote = `\n(GitHub access failed for this turn: ${(err as Error).message})`
     }
 
     const history = turn.firstTurn ? await threadHistory(env, channel, threadTs, turn.messages[0].ts) : []
@@ -87,6 +90,7 @@ export async function runTurnJob(env: Env, job: TurnJob, attempt: number, maxAtt
       callbackToken,
       transcriptUrl: new URL('/sandbox/transcript', job.origin).toString(),
       progressUrl: new URL('/sandbox/progress', job.origin).toString(),
+      memoryUrl: new URL('/sandbox/memory', job.origin).toString(),
       origin: job.origin,
       toolsToken,
       files,

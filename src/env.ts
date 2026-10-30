@@ -29,10 +29,13 @@ export interface Env {
   // Signs the token a sandbox uses to post its reply back. Any long random string.
   CALLBACK_SECRET: string
 
-  // GitHub App, optional. Set the ID and the key and the bot can open PRs.
-  GITHUB_APP_ID?: string
-  GITHUB_APP_PRIVATE_KEY?: string
+  // GitHub App, REQUIRED. The bot's memory lives in a repo it reaches through the App, and the
+  // same App lets it open pull requests. A turn refuses to start without it (src/github.ts).
+  GITHUB_APP_ID: string
+  GITHUB_APP_PRIVATE_KEY: string
   GITHUB_INSTALLATION_ID?: string
+  /** The memory repo, `owner/name` (a var in wrangler.jsonc). One folder per channel: src/memory.ts. */
+  MEMORY_REPO: string
 
   MAX_TURN_MINUTES: string
   IDLE_PAUSE_MINUTES: string

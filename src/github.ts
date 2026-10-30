@@ -2,27 +2,58 @@ import { b64url } from './callback-token.ts'
 import type { Env } from './env.ts'
 
 /**
- * GitHub App tokens for the sandbox.
+ * GitHub App tokens, for the sandbox and for the memory store.
  *
  * The token GitHub mints for an installation lasts 1 hour and reaches only the repos the student
  * picked when they installed the App. That is the whole reach of the bot on GitHub: no personal
  * token, nothing that outlives the turn by more than the hour.
+ *
+ * The App is REQUIRED: the bot's memory lives in a repo it reaches through the App (src/memory.ts).
  */
-export function githubConfigured(env: Env) {
-  return Boolean(env.GITHUB_APP_ID && env.GITHUB_APP_PRIVATE_KEY)
+
+/** What is missing for GitHub and the memory repo, as sentences. Empty when all is set. */
+export function githubMissing(env: Pick<Env, 'GITHUB_APP_ID' | 'GITHUB_APP_PRIVATE_KEY' | 'MEMORY_REPO'>): string[] {
+  const missing: string[] = []
+  if (!env.GITHUB_APP_ID || !env.GITHUB_APP_PRIVATE_KEY) {
+    missing.push('Set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY: the GitHub App is required (see "GitHub App" in the README).')
+  }
+  if (!parseRepo(env.MEMORY_REPO)) {
+    missing.push('Set MEMORY_REPO in wrangler.jsonc to the memory repo as owner/name, and install the GitHub App on it.')
+  }
+  return missing
+}
+
+/** `owner/name`, or null when it is not one. */
+export function parseRepo(value: string | undefined): { owner: string; name: string } | null {
+  const m = String(value ?? '').trim().match(/^([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100})$/)
+  return m && m[2] !== '.' && m[2] !== '..' ? { owner: m[1], name: m[2] } : null
 }
 
 /** Only what opening a PR needs. A token can never hold more than the App was granted. */
 export const TOKEN_PERMISSIONS = { contents: 'write', pull_requests: 'write', metadata: 'read' } as const
 
-export async function mintInstallationToken(env: Env, fetchImpl: typeof fetch = fetch): Promise<string> {
-  const jwt = await appJwt(env.GITHUB_APP_ID!, env.GITHUB_APP_PRIVATE_KEY!)
-  const headers = {
-    authorization: `Bearer ${jwt}`,
+/** The Worker's own token for the memory repo: that one repo, its files and nothing else. */
+export const MEMORY_PERMISSIONS = { contents: 'write', metadata: 'read' } as const
+
+export interface TokenScope {
+  permissions?: Record<string, string>
+  /** Repo names (no owner) the token may reach. Unset means every repo of the installation. */
+  repositories?: string[]
+  repositoryIds?: number[]
+}
+
+export function githubHeaders(token: string) {
+  return {
+    authorization: `Bearer ${token}`,
     accept: 'application/vnd.github+json',
     'x-github-api-version': '2022-11-28',
     'user-agent': 'slack-agent-starter',
   }
+}
+
+export async function mintInstallationToken(env: Env, fetchImpl: typeof fetch = fetch, scope: TokenScope = {}): Promise<string> {
+  const jwt = await appJwt(env.GITHUB_APP_ID!, env.GITHUB_APP_PRIVATE_KEY!)
+  const headers = githubHeaders(jwt)
 
   let installationId = env.GITHUB_INSTALLATION_ID
   if (!installationId) {
@@ -42,10 +73,55 @@ export async function mintInstallationToken(env: Env, fetchImpl: typeof fetch = 
   const res = await fetchImpl(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ permissions: TOKEN_PERMISSIONS }),
+    body: JSON.stringify({
+      permissions: scope.permissions ?? TOKEN_PERMISSIONS,
+      ...(scope.repositories ? { repositories: scope.repositories } : {}),
+      ...(scope.repositoryIds ? { repository_ids: scope.repositoryIds } : {}),
+    }),
   })
   if (!res.ok) throw new Error(`github access token: ${res.status} ${await res.text()}`)
   return ((await res.json()) as { token: string }).token
+}
+
+/** GitHub takes at most this many repos in one scoped token. */
+export const MAX_SCOPED_REPOS = 500
+
+/**
+ * The turn's token: PR permissions on every repo the App is installed on EXCEPT the memory repo.
+ * The sandbox must never reach the memory repo directly, or one channel could read another
+ * channel's notes (src/memory.ts). GitHub cannot mint "all but one", so we list the repos with a
+ * first token that never leaves the Worker, and mint the turn's token for the rest by id.
+ * Null when the memory repo is the only repo: then the turn simply has no GitHub access.
+ */
+export async function mintTurnToken(env: Env, fetchImpl: typeof fetch = fetch): Promise<string | null> {
+  const memory = parseRepo(env.MEMORY_REPO)
+  const lister = await mintInstallationToken(env, fetchImpl, { permissions: { metadata: 'read' } })
+  const ids = withoutRepo(await listInstallationRepos(lister, fetchImpl), memory)
+  if (!ids.length) return null
+  return mintInstallationToken(env, fetchImpl, { repositoryIds: ids.slice(0, MAX_SCOPED_REPOS) })
+}
+
+export interface InstalledRepo {
+  id: number
+  full_name: string
+}
+
+/** The ids of every repo but the memory repo. Compared case-blind, as GitHub names are. */
+export function withoutRepo(repos: InstalledRepo[], memory: { owner: string; name: string } | null): number[] {
+  const skip = memory ? `${memory.owner}/${memory.name}`.toLowerCase() : null
+  return repos.filter((r) => String(r.full_name).toLowerCase() !== skip).map((r) => r.id)
+}
+
+async function listInstallationRepos(token: string, fetchImpl: typeof fetch): Promise<InstalledRepo[]> {
+  const repos: InstalledRepo[] = []
+  for (let page = 1; page <= Math.ceil(MAX_SCOPED_REPOS / 100) + 1; page++) {
+    const res = await fetchImpl(`https://api.github.com/installation/repositories?per_page=100&page=${page}`, { headers: githubHeaders(token) })
+    if (!res.ok) throw new Error(`github repositories: ${res.status} ${await res.text()}`)
+    const batch = ((await res.json()) as { repositories: InstalledRepo[] }).repositories ?? []
+    repos.push(...batch)
+    if (batch.length < 100) break
+  }
+  return repos
 }
 
 /** A 9-minute RS256 JWT that proves we are the App (GitHub allows 10). */

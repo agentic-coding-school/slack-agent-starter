@@ -44,6 +44,9 @@
     // which stops a sandbox after 1 hour of continuous running.
     "MAX_TURN_MINUTES": "45",
     // How long a thread may sit quiet before its sandbox is paused.
-    "IDLE_PAUSE_MINUTES": "5"
+    "IDLE_PAUSE_MINUTES": "5",
+    // The bot's memory: a private GitHub repo, owner/name, with the GitHub App installed on it.
+    // One folder per Slack channel (src/memory.ts). `npm run setup` sets this for you.
+    "MEMORY_REPO": ""
   }
 }

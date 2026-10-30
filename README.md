@@ -2,7 +2,8 @@
 
 Your own coding agent in Slack. @mention it in a thread, and it runs **Claude Code** in its own
 cloud sandbox and replies in the thread. Follow-ups in the thread continue the same conversation.
-With the optional GitHub App, it can clone your repos and open pull requests.
+It remembers what it learns in each channel, in a private GitHub repo you own, and through the
+same GitHub App it can clone your repos and open pull requests.
 
 It runs on **Cloudflare Workers**, and the sandbox runs on **E2B** or **Impello** (you pick).
 
@@ -21,7 +22,7 @@ It runs on **Cloudflare Workers**, and the sandbox runs on **E2B** or **Impello*
 | Claude: a **Pro/Max plan** or an **Anthropic API key** | Your plan, or pay per use | Read [Which Claude sign-in?](#which-claude-sign-in) first. |
 | A Slack workspace where you can install apps | Free | |
 | Node.js 22.6 or newer | Free | `node --version` |
-| A GitHub account (optional) | Free | Only for the pull request feature. |
+| A GitHub account | Free | Required: the bot's memory lives in a private repo, reached through a GitHub App. |
 
 ## Setup
 
@@ -75,9 +76,13 @@ To switch later, run `npm run setup` again and pick the other one.
 The bot answers **anyone** in the workspace who @mentions it. This is on purpose: it keeps the
 starter simple. Pick the workspace, the channel and the sign-in with that in mind.
 
-## GitHub App (optional)
+## GitHub App (required)
 
-With this, the bot can clone your repos, push a branch and open a pull request.
+The bot keeps its memory in a private GitHub repo and reaches it through a GitHub App you make. The
+same App lets it clone your repos, push a branch and open a pull request.
+
+0. Create the memory repo first: **GitHub > New repository**, name it (for example `my-bot-memory`),
+   make it **Private**, and tick **Add a README** (the bot cannot write to an empty repo).
 
 1. Go to **GitHub > Settings > Developer settings > GitHub Apps > New GitHub App**.
 2. Name it anything. Homepage URL: your Worker URL. **Untick Webhook > Active.**
@@ -85,15 +90,18 @@ With this, the bot can clone your repos, push a branch and open a pull request.
    Metadata (read) is added for you.
 4. "Where can this GitHub App be installed?": **Only on this account**. Click **Create**.
 5. Note the **App ID**. Scroll down and click **Generate a private key**. A `.pem` file downloads.
-6. Click **Install App**, then pick **Only select repositories** and choose the repos the bot may use.
-7. Run `npm run setup` again (or just its GitHub step) and give it the App ID and the `.pem` path.
+6. Click **Install App**, then pick **Only select repositories** and choose the **memory repo** and
+   the repos the bot may work in.
+7. Run `npm run setup` again and give it the App ID, the `.pem` path and the memory repo
+   (`owner/name`, which goes into `MEMORY_REPO` in `wrangler.jsonc`).
 
 **Protect your main branch.** In each repo: Settings > Rules > Rulesets > New branch ruleset,
 target `main`, and tick **Require a pull request before merging**. The bot is told never to push to
 `main`, but a rule is what actually stops it.
 
-What the bot's GitHub token can do: it lasts 1 hour, reaches only the repos you picked in step 6, and
-can only read and write code and pull requests.
+What the bot's GitHub token can do: it lasts 1 hour, reaches only the repos you picked in step 6
+**except the memory repo**, and can only read and write code and pull requests. The sandbox never
+gets a token for the memory repo; see [Memory](#memory).
 
 ## How it works
 
@@ -147,6 +155,8 @@ can only read and write code and pull requests.
   `action_token` it puts on an @mention or a DM, so search works in turns started that way; a
   follow-up typed without a mention may be refused, and Claude asks for a mention. The thread keeps
   the token; it never enters the sandbox.
+- **It remembers, per channel.** Claude Code's own auto memory writes notes into a folder, and the
+  bot keeps that folder in your memory repo, one folder per channel. See [Memory](#memory).
 - **The Slack token never enters the sandbox.** The sandbox gets a token that can post one turn's answer
   into one thread, and it expires. Claude reads text anyone can write, so the sandbox holds as little
   as possible.
@@ -158,7 +168,9 @@ can only read and write code and pull requests.
 | `src/thread-state.ts` | The Durable Object that stores a thread and runs its alarm |
 | `src/turn.ts` | Starts one turn: prompt, tokens, launch |
 | `src/sandbox.ts` | E2B / Impello: find, create, pause, launch |
-| `src/github.ts` | GitHub App tokens |
+| `src/github.ts` | GitHub App tokens: the turn's (every repo but memory) and the memory repo's |
+| `src/memory.ts` | The memory rules: one folder per channel, which paths sync, merging two threads' notes |
+| `src/memory-store.ts` | Reads and commits a channel's memory folder through GitHub's API |
 | `src/models.ts` | The `!model` aliases and their model ids, in one place |
 | `src/status.ts` | The live status message and the Stop button: the line, its caps, reading a click |
 | `src/transcripts.ts` | The transcript backup rules: the R2 key, the size limit |
@@ -168,6 +180,7 @@ can only read and write code and pull requests.
 | `migrations/` | The D1 tables. `npm run setup` applies them |
 | `box/run-turn.mjs` | Runs inside the sandbox: runs Claude, reports progress, posts the answer back |
 | `box/progress.mjs` | Runs inside the sandbox: turns Claude's stream events into the status line |
+| `box/memory.mjs` | Runs inside the sandbox: pulls the channel's notes before Claude starts and pushes what changed |
 | `box/files.mjs` | Runs inside the sandbox: downloads the turn's files before Claude starts |
 | `box/tools.mjs` | Runs inside the sandbox: Claude's commands to post a file or a canvas into its thread, and to search public channels |
 | `box/inbox.mjs`, `box/inbox-hook.mjs` | Runs inside the sandbox: follow-ups sent mid-turn, and the hook that hands them to Claude |
@@ -180,6 +193,32 @@ Each thread runs on **Opus** unless you say otherwise. Send `!model sonnet` (or 
 the thread, on its own, to switch; `!model` alone shows the current one. A turn that is already
 running keeps its model, and the switch applies from the next turn. The aliases and the model ids
 they map to live in `src/models.ts`.
+
+## Memory
+
+The bot remembers. It uses **Claude Code's own auto memory**: Claude reads a `MEMORY.md` index when
+a turn starts and writes short notes as it learns (a decision, how your repo builds, a gotcha). Those
+notes live in your **memory repo**, one folder per Slack channel, named by the channel id:
+
+```
+my-bot-memory/
+  C1EXAMPLE01/MEMORY.md
+  C1EXAMPLE01/deploy_steps.md
+```
+
+- **Each turn:** before Claude starts, the sandbox pulls its channel's folder from `/sandbox/memory`
+  and points auto memory at it. After Claude stops, it sends what changed back to the same door,
+  and the Worker commits it to the repo. A commit message names the channel and the thread.
+- **A channel sees only its own folder.** The Worker picks the folder from the sandbox's one-turn
+  token, never from the request, and the sandbox never holds a token for the memory repo: the turn's
+  GitHub token is minted for every installed repo except that one. So a private channel's memory is
+  never shared with another channel.
+- **Two threads at once** in one channel merge: the index keeps both sides' lines, and a note both
+  changed keeps the stored version with the other saved beside it as `<name>.conflict-<turn>.md`.
+  A failed push is kept in the sandbox and sent with the next turn.
+- **Read it, fix it, undo it.** It is a git repo: browse it on GitHub, edit or delete a note, or
+  revert a commit. Do look now and then. Anyone who can talk to the bot can teach it something, and
+  a note **outlives the thread**: it is read by every later thread in that channel.
 
 ## Transcript backups
 
@@ -197,6 +236,7 @@ In `wrangler.jsonc` under `vars`. Run `npm run deploy` after you change one.
 | `MAX_TURN_MINUTES` | 45 | How long one turn may run. Keep it under 50 on E2B Hobby. |
 | `IDLE_PAUSE_MINUTES` | 5 | How long a thread may be quiet before its sandbox pauses. |
 | `SANDBOX_TEMPLATE` | `slack-agent` | The sandbox image name. |
+| `MEMORY_REPO` | (set by setup) | The memory repo, `owner/name`. Required. |
 
 ## When something goes wrong
 

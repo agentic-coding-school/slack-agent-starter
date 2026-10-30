@@ -13,13 +13,18 @@
 // the live status message in Slack) every few seconds, and the answer says whether someone pressed
 // Stop. On a stop it ends Claude and reports `stopped`, which is what frees the thread.
 //
+// Memory (memory.mjs): before Claude starts, the runner pulls the channel's notes from the Worker's
+// /sandbox/memory door and points Claude Code's auto memory at them. Under the lock, after Claude
+// stops, it reads what changed; the push runs beside the answer, like the transcript upload, and a
+// failed push is kept for the next turn's push.
+//
 // The same answers hand over follow-ups sent in the thread while Claude works. The runner drops
 // them in the turn's inbox, and a Claude Code hook gives them to Claude at its next tool step
 // (inbox.mjs). The answer reports which ones Claude read, so the Worker knows they are covered.
 //
 // Env (set by the Worker for this turn only):
 //   TURN_ID, SESSION_ID, PROMPT_FILE, CALLBACK_URL, CALLBACK_TOKEN, TRANSCRIPT_URL, PROGRESS_URL,
-//   TURN_DEADLINE,
+//   TURN_DEADLINE, MEMORY_URL (where the channel's memory is pulled and pushed),
 //   AGENT_INBOX (optional; where follow-ups wait, default a per-turn folder in /tmp)
 //   FILES_MANIFEST, FILE_URL (when the turn's messages carried files; see files.mjs)
 //   AGENT_API_URL, AGENT_TOOLS_TOKEN (Claude's own token for tools.mjs; passed through to Claude)
@@ -34,6 +39,7 @@ import { fileURLToPath } from 'node:url'
 import { gzipSync } from 'node:zlib'
 import { DOWNLOAD_ACTIVITY, downloadAll, downloadDeadline, filesNote } from './files.mjs'
 import { deliver, hookSettings, READ_ACTIVITY, takenTs } from './inbox.mjs'
+import { changesSince, memoryNote, pull, push, readLocal, writeMemorySettings } from './memory.mjs'
 import { createProgress, onStreamEvent, shouldSendStatus, TICK_MS } from './progress.mjs'
 
 const env = process.env
@@ -42,6 +48,11 @@ const LOCK = env.TURN_LOCK_FILE || '/tmp/agent-turn.lock'
 // One folder per turn, so a follow-up handed to an older turn can never be read by this one.
 const INBOX = env.AGENT_INBOX || `/tmp/agent-inbox-${String(env.TURN_ID).replace(/[^\w-]/g, '')}`
 const INBOX_HOOK = join(dirname(fileURLToPath(import.meta.url)), 'inbox-hook.mjs')
+// The channel's memory folder and its last-sync record (memory.mjs). MEMORY_DIR, MEMORY_BASE_FILE
+// and CLAUDE_SETTINGS_FILE exist for the runner's tests only.
+const MEMORY_DIR = env.MEMORY_DIR || join(homedir(), '.agent', 'memory')
+const MEMORY_BASE = env.MEMORY_BASE_FILE || join(homedir(), '.agent', 'memory-base.json')
+const CLAUDE_SETTINGS = env.CLAUDE_SETTINGS_FILE || join(homedir(), '.claude', 'settings.json')
 
 // The Worker only starts one turn per thread at a time, but a queue retry can start the same one
 // twice. A second runner must not touch the session: two `--resume` runs on one transcript break it.
@@ -88,6 +99,9 @@ function isAlive(pid) {
 
 let result = { ok: false, error: 'the run ended without a result' }
 let snapshot = null
+// The base of the pull (null when there was none, or it failed: then nothing is pushed).
+let memoryBase = null
+let memorySnapshot = null
 try {
   result = await runClaude()
 } catch (err) {
@@ -100,13 +114,14 @@ try {
   // Still holding the lock, so no next turn is writing to the transcript while it is read. Only
   // the read happens here: the upload runs after the lock is freed, so the next turn is not refused.
   snapshot = snapshotTranscript()
+  memorySnapshot = snapshotMemory()
   closeSync(lockFd)
   rmSync(LOCK, { force: true })
   rmSync(env.PROMPT_FILE, { force: true })
 }
 // The answer goes first and never waits on the backup: report() needs all of the thread's
 // lost-turn margin (src/thread.ts LOST_TURN_MARGIN_MS) for its retries.
-await Promise.all([report(result), uploadTranscript(snapshot)])
+await Promise.all([report(result), uploadTranscript(snapshot), pushMemory(memorySnapshot)])
 
 async function runClaude() {
   // First turn creates the session, every later turn resumes it. The transcript file on disk is
@@ -180,6 +195,7 @@ async function runClaude() {
 
   // The deadline comes from the thread, which started counting when it accepted the message.
   const deadline = Number(env.TURN_DEADLINE) || Date.now() + 45 * 60_000
+  await loadMemory()
   await fetchFiles(workDir, { deadline: downloadDeadline(deadline, Date.now()), signal: downloads.signal })
   if (stopped) {
     if (ticker) clearInterval(ticker)
@@ -206,7 +222,7 @@ async function runClaude() {
   return await new Promise((resolve) => {
     // Claude and every command it runs get the env WITHOUT the reply token: a prompt-injected
     // Claude must not be able to post its own "answer" and end the turn.
-    const { CALLBACK_TOKEN: _t, CALLBACK_URL: _u, TRANSCRIPT_URL: _x, PROGRESS_URL: _p, FILES_MANIFEST: _m, FILE_URL: _f, ...childEnv } = env
+    const { CALLBACK_TOKEN: _t, CALLBACK_URL: _u, TRANSCRIPT_URL: _x, PROGRESS_URL: _p, FILES_MANIFEST: _m, FILE_URL: _f, MEMORY_URL: _y, ...childEnv } = env
     child = spawn('claude', args, {
       cwd: join(homedir(), 'work'),
       env: { ...childEnv, AGENT_INBOX: INBOX },
@@ -280,6 +296,47 @@ async function fetchFiles(workDir, { deadline, signal }) {
   const results = await downloadAll({ manifest, url: env.FILE_URL, workDir, deadline, signal })
   const note = filesNote(results)
   if (note) appendFileSync(env.PROMPT_FILE, `\n${note}\n`)
+}
+
+/**
+ * Pulls the channel's notes and turns auto memory on for them. If the pull fails, auto memory is
+ * turned off for the turn and the prompt says so: notes written now could not be loaded later.
+ */
+async function loadMemory() {
+  if (!env.MEMORY_URL) return
+  const pulled = await pull({ url: env.MEMORY_URL, token: env.CALLBACK_TOKEN, turnId: env.TURN_ID, dir: MEMORY_DIR, baseFile: MEMORY_BASE })
+  if (pulled.ok) memoryBase = pulled.base
+  else console.error('memory pull failed:', pulled.error)
+  try {
+    writeMemorySettings(CLAUDE_SETTINGS, pulled.ok ? MEMORY_DIR : null)
+  } catch (err) {
+    console.error('could not write the memory settings:', err?.message ?? err)
+  }
+  const note = memoryNote(pulled)
+  if (note) appendFileSync(env.PROMPT_FILE, `\n${note}\n`)
+}
+
+/** What Claude changed in its notes, read under the lock. Null when there is nothing to push. */
+function snapshotMemory() {
+  if (!memoryBase) return null
+  try {
+    const local = readLocal(MEMORY_DIR)
+    const changes = changesSince(memoryBase, local)
+    return changes.length ? { local, changes } : null
+  } catch (err) {
+    console.error('could not read the memory folder:', err?.message ?? err)
+    return null
+  }
+}
+
+/** Pushes the changes. A failure is logged and kept: the next turn's push sends them again. */
+async function pushMemory(snap) {
+  if (!snap) return
+  try {
+    await push({ url: env.MEMORY_URL, token: env.CALLBACK_TOKEN, turnId: env.TURN_ID, base: memoryBase, baseFile: MEMORY_BASE, ...snap })
+  } catch (err) {
+    console.error('memory push failed:', err?.message ?? err)
+  }
 }
 
 function sessionExists(id) {

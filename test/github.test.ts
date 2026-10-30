@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { createPublicKey, generateKeyPairSync, verify } from 'node:crypto'
 import { test } from 'node:test'
-import { appJwt, mintInstallationToken, TOKEN_PERMISSIONS } from '../src/github.ts'
+import { appJwt, githubMissing, mintInstallationToken, mintTurnToken, parseRepo, TOKEN_PERMISSIONS, withoutRepo } from '../src/github.ts'
 
 // GitHub hands out PKCS#1 keys; the code must accept that format as-is.
 const { privateKey, publicKey } = generateKeyPairSync('rsa', {
@@ -42,4 +42,58 @@ test('refuses to guess between several installations', async () => {
   const fakeFetch = (async () => Response.json([{ id: 1 }, { id: 2 }])) as unknown as typeof fetch
   const env = { GITHUB_APP_ID: '1', GITHUB_APP_PRIVATE_KEY: privateKey } as never
   await assert.rejects(mintInstallationToken(env, fakeFetch), /GITHUB_INSTALLATION_ID/)
+})
+
+test('the GitHub App and the memory repo are required, each with a sentence saying what to set', () => {
+  assert.deepEqual(githubMissing({ GITHUB_APP_ID: '1', GITHUB_APP_PRIVATE_KEY: 'k', MEMORY_REPO: 'me/bot-memory' }), [])
+  const none = githubMissing({ GITHUB_APP_ID: '', GITHUB_APP_PRIVATE_KEY: '', MEMORY_REPO: '' })
+  assert.equal(none.length, 2)
+  assert.match(none[0], /GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY/)
+  assert.match(none[1], /MEMORY_REPO/)
+  assert.match(githubMissing({ GITHUB_APP_ID: '1', GITHUB_APP_PRIVATE_KEY: 'k', MEMORY_REPO: 'bot-memory' })[0], /owner\/name/)
+})
+
+test('parseRepo takes owner/name and nothing that could bend a URL', () => {
+  assert.deepEqual(parseRepo(' me/bot-memory '), { owner: 'me', name: 'bot-memory' })
+  for (const bad of ['', 'me', 'me/', 'me/a/b', 'me/..', '../x', 'me/a?b', 'me/a#b', undefined]) assert.equal(parseRepo(bad), null, String(bad))
+})
+
+test('the turn token reaches every installed repo except the memory repo', async () => {
+  assert.deepEqual(
+    withoutRepo(
+      [
+        { id: 1, full_name: 'me/app' },
+        { id: 2, full_name: 'Me/Bot-Memory' },
+        { id: 3, full_name: 'other/bot-memory' },
+      ],
+      { owner: 'me', name: 'bot-memory' },
+    ),
+    [1, 3],
+  )
+
+  const minted: Array<Record<string, unknown>> = []
+  const fakeFetch = (async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/access_tokens')) {
+      minted.push(JSON.parse(init!.body as string))
+      return Response.json({ token: `ghs_${minted.length}` })
+    }
+    if (url.includes('/installation/repositories')) {
+      assert.equal((init!.headers as Record<string, string>).authorization, 'Bearer ghs_1')
+      return Response.json({ repositories: [{ id: 10, full_name: 'me/app' }, { id: 11, full_name: 'me/bot-memory' }] })
+    }
+    throw new Error(url)
+  }) as typeof fetch
+  const env = { GITHUB_APP_ID: '1', GITHUB_APP_PRIVATE_KEY: privateKey, GITHUB_INSTALLATION_ID: '7', MEMORY_REPO: 'me/bot-memory' } as never
+  assert.equal(await mintTurnToken(env, fakeFetch), 'ghs_2')
+  // The listing token can only read metadata; the turn's token names the other repos by id.
+  assert.deepEqual(minted, [{ permissions: { metadata: 'read' } }, { permissions: TOKEN_PERMISSIONS, repository_ids: [10] }])
+})
+
+test('no turn token when the App is installed on the memory repo alone', async () => {
+  const fakeFetch = (async (url: string) =>
+    url.includes('/installation/repositories')
+      ? Response.json({ repositories: [{ id: 11, full_name: 'me/bot-memory' }] })
+      : Response.json({ token: 'ghs_x' })) as unknown as typeof fetch
+  const env = { GITHUB_APP_ID: '1', GITHUB_APP_PRIVATE_KEY: privateKey, GITHUB_INSTALLATION_ID: '7', MEMORY_REPO: 'me/bot-memory' } as never
+  assert.equal(await mintTurnToken(env, fakeFetch), null)
 })

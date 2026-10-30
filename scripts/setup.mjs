@@ -136,6 +136,12 @@ if (SKIP_TEMPLATE) {
   }
 }
 
+// The memory repo is a plain var (not a secret), so it goes into wrangler.jsonc before the deploy.
+const MEMORY_REPO_RE = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/
+const memoryRepo = (answers.MEMORY_REPO ?? '').replace(/^https:\/\/github\.com\//, '').replace(/\.git$/, '').replace(/\/$/, '')
+const memoryRepoOk = MEMORY_REPO_RE.test(memoryRepo)
+if (memoryRepoOk) setVar('MEMORY_REPO', memoryRepo)
+
 step('Queue, bucket, database and Worker')
 const queue = wrangler(['queues', 'create', QUEUE], { capture: true })
 if (!queue.ok && !/already exists|already taken|11009/i.test(queue.out)) {
@@ -205,6 +211,8 @@ if (answers.SLACK_SIGNING_SECRET && answers.SLACK_BOT_TOKEN) {
   )
 }
 
+// The GitHub App is REQUIRED: the bot keeps its memory in a repo it reaches through the App. A turn
+// refuses to start until the App and MEMORY_REPO are set (src/github.ts githubMissing).
 if (answers.GITHUB_APP_ID && answers.GITHUB_APP_PRIVATE_KEY_PATH) {
   if (!existsSync(answers.GITHUB_APP_PRIVATE_KEY_PATH)) {
     next.push(`GITHUB_APP_PRIVATE_KEY_PATH is ${answers.GITHUB_APP_PRIVATE_KEY_PATH}, and no file is there. Fix the path and run again.`)
@@ -213,6 +221,18 @@ if (answers.GITHUB_APP_ID && answers.GITHUB_APP_PRIVATE_KEY_PATH) {
     putSecret('GITHUB_APP_PRIVATE_KEY', readFileSync(answers.GITHUB_APP_PRIVATE_KEY_PATH, 'utf8'))
     if (answers.GITHUB_INSTALLATION_ID) putSecret('GITHUB_INSTALLATION_ID', answers.GITHUB_INSTALLATION_ID)
   }
+} else {
+  next.push(
+    'The human creates the GitHub App (README, "GitHub App"; it is required) and installs it on the memory repo and ' +
+      'the repos the bot may work in. Then they fill in GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_PATH, and you run setup again.',
+  )
+}
+if (!memoryRepoOk) {
+  next.push(
+    (answers.MEMORY_REPO ? `MEMORY_REPO is "${answers.MEMORY_REPO}", which is not owner/name. ` : '') +
+      'The human creates a PRIVATE GitHub repo for the bot\'s memory (for example my-bot-memory) with a README, and ' +
+      'installs the GitHub App on it. Put it in MEMORY_REPO as owner/name and run setup again.',
+  )
 }
 
 rl?.close()
@@ -257,10 +277,11 @@ async function askEverything() {
   a.SLACK_SIGNING_SECRET = await askHidden('Slack Signing Secret (Enter to skip):')
   a.SLACK_BOT_TOKEN = await askHidden('Slack Bot User OAuth Token (Enter to skip):')
 
-  if ((await rl.question('\nSet up the GitHub App now (see README)? [y/N] ')).trim().toLowerCase().startsWith('y')) {
-    a.GITHUB_APP_ID = (await rl.question('App ID: ')).trim()
-    a.GITHUB_APP_PRIVATE_KEY_PATH = (await rl.question('Path to the private key (.pem): ')).trim()
-  }
+  console.log('\nThe GitHub App is required: the bot keeps its memory in a private repo it reaches through the App.')
+  console.log('See "GitHub App" in the README. Press Enter to skip for now; setup then tells you what is left.')
+  a.GITHUB_APP_ID = (await rl.question('App ID: ')).trim()
+  a.GITHUB_APP_PRIVATE_KEY_PATH = (await rl.question('Path to the private key (.pem): ')).trim()
+  a.MEMORY_REPO = (await rl.question('Memory repo, owner/name (for example you/my-bot-memory): ')).trim()
   return a
 }
 
