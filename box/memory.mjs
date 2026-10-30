@@ -8,7 +8,7 @@
 // The folder lives as long as the thread's sandbox, so a push can fail (the Worker mid-deploy) and
 // the next turn must not throw those notes away. So the runner keeps a BASE file: what each note was
 // at the last sync. A note that differs from its base is a local edit not yet pushed, and a pull
-// leaves it alone; the next push sends it.
+// leaves it alone, along with its base entry; the next push sends it against that base.
 
 import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
@@ -56,13 +56,23 @@ export function readLocal(dir) {
 /**
  * What a pull does to the folder. `remote` is the channel's notes (path -> sha), `base` the last
  * sync, `local` the folder now (path -> sha). Unpushed local edits stay; everything else becomes
- * the remote. The new base is the remote, so the next push compares against what the Worker has.
+ * the remote. The new base is the remote, except for a path that still holds an unpushed edit or
+ * delete: that one keeps the base the edit was made from. Otherwise the next push would claim the
+ * edit was made on top of the remote's current version, and the Worker would let it overwrite
+ * another thread's change instead of saving it beside as a conflict.
  */
 export function planPull({ remote, base, local }) {
   const pending = (path) => local[path] !== base[path]
   const write = Object.keys(remote).filter((p) => !pending(p) && local[p] !== remote[p])
   const remove = Object.keys(local).filter((p) => !(p in remote) && !pending(p))
-  return { write, remove, base: { ...remote } }
+  const next = { ...remote }
+  for (const p of new Set([...Object.keys(local), ...Object.keys(base)])) {
+    // Already what the remote has (a push that landed but could not save its base): in sync.
+    if (!pending(p) || local[p] === remote[p]) continue
+    if (p in base) next[p] = base[p]
+    else delete next[p]
+  }
+  return { write, remove, base: next }
 }
 
 /** What changed since the base: new or edited notes with their text, deleted ones as null. */

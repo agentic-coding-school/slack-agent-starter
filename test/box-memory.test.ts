@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { blobSha as workerSha } from '../src/memory.ts'
+import { planMerge, blobSha as workerSha } from '../src/memory.ts'
 
 const box = join(dirname(fileURLToPath(import.meta.url)), '..', 'box')
 const mem = await import(pathToFileURL(join(box, 'memory.mjs')).href)
@@ -42,7 +42,38 @@ test('planPull keeps unpushed local edits and deletes, and takes the remote for 
   // of gone-here.md, and draft.md are unpushed edits and stay. removed.md went remotely.
   assert.deepEqual(plan.write.sort(), ['new.md', 'theirs.md'])
   assert.deepEqual(plan.remove, ['removed.md'])
-  assert.deepEqual(plan.base, { 'same.md': 's', 'theirs.md': 't2', 'mine.md': 'r', 'gone-here.md': 'g', 'new.md': 'n' })
+  // A pending path keeps the base its edit was made from (mine.md stays m0, draft.md stays absent).
+  assert.deepEqual(plan.base, { 'same.md': 's', 'theirs.md': 't2', 'mine.md': 'm0', 'gone-here.md': 'g', 'new.md': 'n' })
+})
+
+test('planPull: a pending path that already matches the remote takes the remote as its base', () => {
+  const plan = mem.planPull({ remote: { 'a.md': 'new' }, base: { 'a.md': 'old', 'gone.md': 'g' }, local: { 'a.md': 'new' } })
+  assert.deepEqual(plan.base, { 'a.md': 'new' })
+})
+
+test('an unpushed edit, another thread\'s change, then a pull: the next push conflicts, it does not overwrite', async () => {
+  const sha = mem.blobSha
+  const [X, L, Y] = ['x\n', 'mine\n', 'theirs\n']
+  const [I0, IL, IY] = ['- a\n', '- a\n- mine\n', '- a\n- theirs\n']
+  // Turn 1 pulled n=X, MEMORY.md=I0 and d=D, edited n and the index, deleted d; its push failed.
+  const base1 = { 'n.md': sha(X), 'MEMORY.md': sha(I0), 'd.md': sha('D\n') }
+  const local = {
+    'n.md': { sha: sha(L), content: L },
+    'MEMORY.md': { sha: sha(IL), content: IL },
+  }
+  // Thread B rewrote all three meanwhile. The delete of d.md must not land on B's rewrite.
+  const remote = { 'n.md': sha(Y), 'MEMORY.md': sha(IY), 'd.md': sha('D2\n') }
+  const localShas = Object.fromEntries(Object.entries(local).map(([p, n]) => [p, n.sha]))
+  const plan = mem.planPull({ remote, base: base1, local: localShas })
+  assert.deepEqual(plan.write, [])
+  assert.deepEqual(plan.remove, [])
+
+  const changes = mem.changesSince(plan.base, local)
+  const steps = await planMerge(remote, { base: plan.base, changes }, 'turn2')
+  assert.deepEqual(steps, [
+    { kind: 'write', path: 'n.conflict-turn2.md', content: L },
+    { kind: 'union', path: 'MEMORY.md', content: IL },
+  ])
 })
 
 test('changesSince lists new, edited and deleted notes only', () => {
