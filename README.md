@@ -8,6 +8,23 @@ someone reviews.
 
 It runs on **Cloudflare Workers**, and the sandbox runs on **E2B** or **Impello** (you pick).
 
+What it does:
+
+- **Threads are conversations.** Each Slack thread gets its own sandbox and Claude session. A
+  follow-up sent while it works reaches Claude at its next step (📨), and the one reply covers both.
+- **You see it work.** A status message says what Claude is doing, with a **Stop** button and a
+  **Follow along** link to the live transcript.
+- **Files both ways.** Files you drop in the thread reach Claude; Claude can post files and canvases back.
+- **Workspace search**, public channels only.
+- **Pick the model** per thread (`!model opus|sonnet|haiku`) or per channel.
+- **Memory** per channel, kept in a private GitHub repo you can read and edit.
+- **Routines**: "every Monday at 9am, check X" posts a new thread on schedule.
+- **Follows its PRs**: a failed check, a review or a comment brings it back to the thread.
+- **Code channels** (a Slack beta), **watched channels** (answers without an @mention), and
+  per-channel **secrets**.
+- **A web UI** behind Cloudflare Access (live transcripts, routines, channels) and a Slack **Home tab**.
+- **Every transcript backed up** to R2, kept forever.
+
 ```
  Slack ──@mention──▶ Worker ──queue──▶ sandbox (one per thread)
    ▲                  │                    │  claude -p --resume <thread session>
@@ -50,8 +67,11 @@ deploys the Worker and tells you how to make the app; then you run `npm run setu
 Slack secrets. Every step is safe to repeat.
 
 Every secret is stored with `wrangler secret put`. None of them go in a file in this repo. Setup
-makes two random ones once and keeps them: `CALLBACK_SECRET` (signs the sandbox's tokens) and
-`CHANNEL_SECRETS_KEY` (encrypts channel secrets; replacing it makes every stored channel secret unreadable).
+makes three random ones once and keeps them: `CALLBACK_SECRET` (signs the sandbox's tokens),
+`CHANNEL_SECRETS_KEY` (encrypts channel secrets; replacing it makes every stored channel secret
+unreadable) and `GITHUB_WEBHOOK_SECRET` (checks GitHub's webhook; setup also writes it into the
+git-ignored `.env.setup` so you can copy it into the GitHub App). If setup cannot read the Worker's
+secret list, it stops rather than make a new one over a working one.
 
 When it is done, invite the bot to a channel (`/invite @percy-jr`) and @mention it.
 
@@ -76,8 +96,19 @@ To switch later, run `npm run setup` again and pick the other one.
 - **An Anthropic API key** ([console.anthropic.com](https://console.anthropic.com)). You pay per
   token. Use this if other people will use the bot. A long coding turn can cost several dollars.
 
-The bot answers **anyone** in the workspace who @mentions it. This is on purpose: it keeps the
-starter simple. Pick the workspace, the channel and the sign-in with that in mind.
+### Who can use it
+
+The bot answers **anyone** in the workspace who @mentions it (or, in a watched channel, anyone who
+posts). This is on purpose: it keeps the starter simple. Pick the workspace, the channel and the
+sign-in with that in mind. Three things follow from it:
+
+- **Memory outlives the thread.** Anyone can teach the bot something, and the note is read by every
+  later thread in that channel. Read the memory repo now and then, and delete what is wrong.
+- **Routines outlive the thread, and have no limits.** Anyone can make one, at any frequency (every
+  minute is allowed), and it runs until someone pauses or deletes it. Each run is a whole Claude turn
+  in a sandbox, so it costs money or plan usage. Check `routine list` in each channel, or the web UI.
+- **The web UI sees everything**, private channels and channel secrets' names included. It is behind
+  Cloudflare Access with a policy that lets in only you; keep it that way ([Web UI](#web-ui)).
 
 ## GitHub App (required)
 
@@ -88,9 +119,10 @@ same App lets it clone your repos, push a branch and open a pull request.
    make it **Private**, and tick **Add a README** (the bot cannot write to an empty repo).
 
 1. Go to **GitHub > Settings > Developer settings > GitHub Apps > New GitHub App**.
-2. Name it anything. Homepage URL: your Worker URL. Leave **Webhook > Active** ticked, set the
-   **Webhook URL** to `<your Worker URL>/github/webhook`, and the **Webhook secret** to a long random
-   string you make (`openssl rand -hex 32`). The same string goes into `GITHUB_WEBHOOK_SECRET`.
+2. Name it anything. Homepage URL: your Worker URL. Leave **Webhook > Active** ticked (it is
+   required), set the **Webhook URL** to `<your Worker URL>/github/webhook`, and the **Webhook
+   secret** to the value setup wrote into `GITHUB_WEBHOOK_SECRET` in `.env.setup` (open the file and
+   copy it; setup never prints it).
 3. Repository permissions: **Contents: Read and write**, **Pull requests: Read and write**,
    **Checks: Read-only**, **Commit statuses: Read-only**, **Actions: Read-only** (so the bot can see
    why CI failed on its PR and read the failed job's log). Metadata (read) is added for you.
@@ -100,8 +132,10 @@ same App lets it clone your repos, push a branch and open a pull request.
 5. Note the **App ID**. Scroll down and click **Generate a private key**. A `.pem` file downloads.
 6. Click **Install App**, then pick **Only select repositories** and choose the **memory repo** and
    the repos the bot may work in.
-7. Run `npm run setup` again and give it the App ID, the `.pem` path, the memory repo
-   (`owner/name`, which goes into `MEMORY_REPO` in `wrangler.jsonc`) and the webhook secret.
+7. Run `npm run setup` again and give it the App ID, the `.pem` path and the memory repo
+   (`owner/name`, which goes into `MEMORY_REPO` in `wrangler.jsonc`). Lost the webhook secret? Make
+   a new long random string (`openssl rand -hex 32`), put it in the App and in
+   `GITHUB_WEBHOOK_SECRET`, and run setup again: a value you give always replaces the stored one.
 
 Made the App before this step existed? Open it (Developer settings > GitHub Apps > Edit), do steps
 2 and 3 (including Checks, Commit statuses and Actions: Read-only), and accept the new permissions on

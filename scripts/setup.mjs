@@ -14,6 +14,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { stdin, stdout } from 'node:process'
 import { createInterface } from 'node:readline/promises'
 import { normaliseUiHost } from '../src/ui.ts'
+import { parseEnvFile, setEnvLine, webhookSecretPlan } from './env-file.ts'
 import { generatedSecretsToCreate, parseSecretList } from './secret-list.ts'
 
 const WRANGLER = ['npx', '--yes', 'wrangler']
@@ -76,18 +77,6 @@ function setDatabaseId(id) {
   writeFileSync(path, text.replace(/("database_id":\s*)"[^"]*"/, `$1"${id}"`))
 }
 
-/** Reads KEY=value lines. Values may be quoted. Empty values count as missing. */
-function readEnvFile(path) {
-  const out = {}
-  for (const line of readFileSync(path, 'utf8').split('\n')) {
-    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/)
-    if (!m) continue
-    const value = m[2].replace(/^(['"])(.*)\1$/, '$2').trim()
-    if (value) out[m[1]] = value
-  }
-  return out
-}
-
 // ---------------------------------------------------------------------------------------------
 // Answers: from the file, or from questions.
 
@@ -98,7 +87,7 @@ if (FILE) {
     console.error(`${FILE} does not exist. Copy .env.setup.example to ${FILE} and fill it in.`)
     process.exit(1)
   }
-  answers = readEnvFile(FILE)
+  answers = parseEnvFile(readFileSync(FILE, 'utf8'))
 } else {
   rl = createInterface({ input: stdin, output: stdout })
   answers = await askEverything()
@@ -225,9 +214,14 @@ step('Secrets')
 // replacing it would cut off any turn that is running right now. CHANNEL_SECRETS_KEY encrypts
 // per-channel secrets (src/channels.ts): replacing it would make every channel secret already
 // stored unreadable, for good. So a failed `wrangler secret list` stops setup here.
+// GITHUB_WEBHOOK_SECRET is made here too unless the human gave one (scripts/env-file.ts); a stored
+// one is kept, because GitHub already signs with it.
 let toGenerate
+let webhookPlan
 try {
-  toGenerate = generatedSecretsToCreate(existingSecrets(), ['CALLBACK_SECRET', 'CHANNEL_SECRETS_KEY'])
+  const have = existingSecrets()
+  toGenerate = generatedSecretsToCreate(have, ['CALLBACK_SECRET', 'CHANNEL_SECRETS_KEY'])
+  webhookPlan = webhookSecretPlan(answers.GITHUB_WEBHOOK_SECRET, have)
 } catch {
   console.error('NEXT: `wrangler secret list` failed or printed something setup cannot read, so no secret was written. Check `npx wrangler secret list` works (and `npx wrangler whoami`), then run setup again.')
   process.exit(1)
@@ -268,15 +262,22 @@ if (answers.GITHUB_APP_ID && answers.GITHUB_APP_PRIVATE_KEY_PATH) {
       'the repos the bot may work in. Then they fill in GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_PATH, and you run setup again.',
   )
 }
-// The App's webhook wakes the thread that opened a PR (src/pr-follow.ts). The human makes the secret
-// and pastes the same string into the App's Webhook settings, so setup never has to show it.
-if (answers.GITHUB_WEBHOOK_SECRET) {
+// The App's webhook wakes the thread that opened a PR (src/pr-follow.ts). GitHub needs the same
+// string in the App's Webhook settings. Setup never prints a secret, so a generated one goes into the
+// git-ignored answers file, written BEFORE it is stored: if storing fails, the next run stores the
+// same string from the file.
+const webhookUrl = `${workerUrl ?? '<worker URL>'}/github/webhook`
+if (webhookPlan === 'use') {
   putSecret('GITHUB_WEBHOOK_SECRET', answers.GITHUB_WEBHOOK_SECRET)
-} else {
+} else if (webhookPlan === 'generate') {
+  const secretFile = FILE ?? '.env.setup'
+  const value = randomBytes(32).toString('hex')
+  writeFileSync(secretFile, setEnvLine(existsSync(secretFile) ? readFileSync(secretFile, 'utf8') : '', 'GITHUB_WEBHOOK_SECRET', value), { mode: 0o600 })
+  putSecret('GITHUB_WEBHOOK_SECRET', value)
   next.push(
-    `The human turns on the GitHub App's webhook (README, "GitHub App", step 2): Webhook URL ${workerUrl ?? '<worker URL>'}/github/webhook, ` +
-      'and a Webhook secret they make (any long random string). They put the same string into GITHUB_WEBHOOK_SECRET, and you run ' +
-      'setup again. Until then the bot opens PRs but is never woken by them.',
+    `Setup made the GitHub webhook secret and wrote it into GITHUB_WEBHOOK_SECRET in ${secretFile} (git-ignored; do not read it aloud). ` +
+      `When the human makes or edits the GitHub App (README, "GitHub App", step 2), they keep Webhook Active, set the Webhook URL to ` +
+      `${webhookUrl}, and copy that line's value from ${secretFile} into the Webhook secret field themselves. Until then the bot opens PRs but is never woken by them.`,
   )
 }
 if (!memoryRepoOk) {
@@ -354,8 +355,9 @@ async function askEverything() {
   a.GITHUB_APP_ID = (await rl.question('App ID: ')).trim()
   a.GITHUB_APP_PRIVATE_KEY_PATH = (await rl.question('Path to the private key (.pem): ')).trim()
   a.MEMORY_REPO = (await rl.question('Memory repo, owner/name (for example you/my-bot-memory): ')).trim()
-  console.log('\nThe webhook secret is the string you typed into the GitHub App\'s Webhook secret field.')
-  a.GITHUB_WEBHOOK_SECRET = await askHidden('GitHub App webhook secret (Enter to skip):')
+  console.log('\nThe GitHub App\'s Webhook secret. Press Enter and setup makes one and writes it into .env.setup')
+  console.log('(git-ignored) for you to copy into the App. Type one only if the App already has a secret you chose.')
+  a.GITHUB_WEBHOOK_SECRET = await askHidden('GitHub App webhook secret (Enter to have setup make one):')
 
   console.log('\nThe web UI is optional. It needs its own hostname on a domain you have in Cloudflare, for example')
   console.log('agent.example.com, behind Cloudflare Access (README, "Web UI"). Skip these if you have no such domain.')

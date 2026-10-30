@@ -49,7 +49,10 @@ npm run setup -- --file .env.setup
 It builds the sandbox image (a few minutes the first time), creates the queue, the R2 bucket for
 transcript backups and the D1 database (and applies `migrations/`), deploys the Worker (which also
 turns on its every-minute Cron Trigger for routines), stores the secrets,
-and writes `slack-manifest.local.json` with the Worker URL in it. It ends with `NEXT:` lines. Read
+and writes `slack-manifest.local.json` with the Worker URL in it. It makes three random secrets
+itself, once: `CALLBACK_SECRET`, `CHANNEL_SECRETS_KEY` and `GITHUB_WEBHOOK_SECRET`. The last one
+GitHub needs too, so setup also writes it into `GITHUB_WEBHOOK_SECRET` in `.env.setup` for the human
+to copy in step 6. Do not read it or print it yourself. It ends with `NEXT:` lines. Read
 them and do what they say. If a step fails, the `NEXT:` line says why; fix that and run it again.
 Running it again is always safe.
 
@@ -83,9 +86,12 @@ start until it is done. Walk the human through "GitHub App" in the README:
 3. They fill in `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH` (the path to the downloaded `.pem`
    file) and `MEMORY_REPO` (`owner/name`, not a secret; you may write it yourself) in `.env.setup`.
 4. The App's webhook stays **Active**: Webhook URL `<worker>/github/webhook` (setup printed the
-   Worker URL), a Webhook secret they make, and the events in README "GitHub App" step 3. They put
-   the same secret into `GITHUB_WEBHOOK_SECRET` in `.env.setup`. Do not make it or read it yourself.
-   It is how the bot comes back to a PR it opened when CI fails or someone reviews.
+   Worker URL) and the events in README "GitHub App" step 3. For the **Webhook secret**, they open
+   `.env.setup` and copy the value of `GITHUB_WEBHOOK_SECRET` (setup made it in step 4) into that
+   field themselves. Do not read it or copy it for them. The webhook is how the bot comes back to a
+   PR it opened when CI fails or someone reviews. If the line is empty (say `.env.setup` was made
+   again after the first run), the Worker already holds a secret nobody can read back: they make a
+   new long random string, put it in both the App and `GITHUB_WEBHOOK_SECRET`, and setup stores it.
 
 Then run setup again with `--skip-template`. Remind them to protect `main` in the repos the bot
 works in.
@@ -133,6 +139,9 @@ Then the human opens `https://<UI_HOST>/ui/` in a browser, signs in, and sees th
   seconds the bot posts "Stopped".
 - Ask them to send a follow-up while a longer task runs ("also add a test"). It gets a 📨, the
   status line soon says "Read your new message", and the one answer covers both. Nothing to set up.
+- In the GitHub App's settings (Advanced > Recent Deliveries), the `ping` GitHub sent when the
+  webhook was saved should show a 200 answer. 401 means the Webhook secret differs from the one in
+  `.env.setup`.
 - If they have a test repo, ask the bot to open a small PR there. Its reply links the PR, and a
   comment on the PR from the human gets a :telescope: line in the thread about a minute later and a
   new turn. Merging it posts "stopped following".
@@ -152,6 +161,11 @@ Then the human opens `https://<UI_HOST>/ui/` in a browser, signs in, and sees th
 
 ## 9. Finish
 
-- Tell the human `.env.setup` can be deleted now (the secrets are stored in Cloudflare), and offer to
-  delete it.
+- Tell the human `.env.setup` can be deleted now (the secrets are stored in Cloudflare, and the
+  webhook secret is in the GitHub App), and offer to delete it. Check with them first that they copied
+  `GITHUB_WEBHOOK_SECRET` into the App: once the file is gone, nobody can read that value back.
+- Tell them what outlives a thread (README "Who can use it"): memory notes and routines. Anyone in
+  the workspace can teach the bot something or make a routine, and both last until someone removes
+  them. Routines have no limit on count or frequency, so check `routine list` (or the web UI's
+  Routines page) now and then.
 - Point them at README.md "How it works" for what each part does.

@@ -27,6 +27,14 @@ paste a secret into the chat; secrets go in `.env.setup`.
   (`test/sandbox-config.test.ts` checks this).
 - Sandboxes pause on timeout, never kill: the Claude transcript lives on the sandbox's disk.
 - Secrets go in with `npx wrangler secret put`. Never commit `.dev.vars` or a key.
+- `scripts/setup.mjs` makes `CALLBACK_SECRET`, `CHANNEL_SECRETS_KEY` and `GITHUB_WEBHOOK_SECRET`
+  once, only when it READ the Worker's secret list and they are not on it (`scripts/secret-list.ts`,
+  `scripts/env-file.ts`); a failed read stops setup. Never regenerate one over a stored one. The
+  webhook secret is written into the git-ignored answers file before it is stored, so the human can
+  copy it into the GitHub App; setup never prints a secret. Setup also creates the queue, the R2
+  bucket, the D1 database and applies `migrations/`, and every step must stay safe to re-run. A new
+  Cloudflare resource goes in `wrangler.jsonc` AND in setup; a new secret or var goes in setup,
+  `.env.setup.example`, SETUP.md and the README together.
 - `box/` files are written into every sandbox on every turn (`run-turn.mjs` imports `progress.mjs`,
   `inbox.mjs` and `files.mjs` from beside it, and `inbox-hook.mjs` imports `inbox.mjs`; a new box file must be added to the write list in `src/sandbox.ts`). A change there reaches running threads
   on the next deploy; a change to `template/Dockerfile` needs `npm run template:build`.
