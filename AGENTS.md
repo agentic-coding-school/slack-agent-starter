@@ -17,10 +17,10 @@ paste a secret into the chat; secrets go in `.env.setup`.
 - D1 tables are made by numbered SQL files in `migrations/`; add a new file, never edit an applied
   one. `npm run setup` applies them. Query through `src/db.ts`, always with bound `?` values.
 - Every sandbox-to-Worker door (`/sandbox/callback`, `/sandbox/transcript`, `/sandbox/progress`,
-  `/sandbox/upload`, `/sandbox/canvas`, `/sandbox/file`) checks a signed token and builds every key,
+  `/sandbox/upload`, `/sandbox/canvas`, `/sandbox/search`, `/sandbox/file`) checks a signed token and builds every key,
   channel and thread from the token's claims, never from the request body. Each token purpose signs
   with its own key (`src/callback-token.ts`): `reply` (the runner only; Claude never sees it),
-  `tools` (Claude's, for upload and canvas), `file` (one grant per Slack file, `src/files.ts`). Text a sandbox sends for Slack is capped and escaped (`src/status.ts`).
+  `tools` (Claude's, for upload, canvas and search), `file` (one grant per Slack file, `src/files.ts`). Text a sandbox sends for Slack is capped and escaped (`src/status.ts`).
 - Slack's own routes (`/slack/events`, `/slack/interactive`) check the signing secret before reading
   the body. The Stop button only marks the turn (rule 6 in `src/thread.ts`); the sandbox ends it.
 - Never put the Slack bot token, the signing secret or `CALLBACK_SECRET` into a sandbox
@@ -30,3 +30,8 @@ paste a secret into the chat; secrets go in `.env.setup`.
 - `box/` files are written into every sandbox on every turn (`run-turn.mjs` imports `progress.mjs`,
   `inbox.mjs` and `files.mjs` from beside it, and `inbox-hook.mjs` imports `inbox.mjs`; a new box file must be added to the write list in `src/sandbox.ts`). A change there reaches running threads
   on the next deploy; a change to `template/Dockerfile` needs `npm run template:build`.
+- Workspace search (`/sandbox/search`, `src/search.ts`) answers from PUBLIC channels only: the bot
+  token, `channel_types: public_channel`, and a `conversations.info` check on every result, which
+  drops anything Slack does not call a public channel. Slack lets a bot token search only with the
+  `action_token` from an @mention or DM event; the thread keeps it (rule 8 in `src/thread.ts`) and it
+  never enters the sandbox. Never add a user token for search.

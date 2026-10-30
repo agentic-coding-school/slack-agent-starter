@@ -38,6 +38,7 @@ const FORM_METHODS = new Set([
   'conversations.history',
   'users.info',
   'files.info',
+  'conversations.info',
   'files.getUploadURLExternal',
   'files.completeUploadExternal',
 ])
@@ -164,4 +165,10 @@ export async function createCanvas(env: Env, args: { channel: string; title: str
   await slackApi(env, 'canvases.access.set', { canvas_id: canvasId, access_level: 'write', channel_ids: [args.channel] })
   const info = await fileInfo(env, canvasId).catch(() => null)
   return { canvasId, permalink: (info?.permalink as string | undefined) ?? null }
+}
+
+/** A channel's conversations.info object, or null when Slack will not say (not found, no access). */
+export async function channelInfo(env: Env, channelId: string): Promise<Record<string, unknown> | null> {
+  const json = await slackApi(env, 'conversations.info', { channel: channelId }).catch(() => null)
+  return (json?.channel as Record<string, unknown> | undefined) ?? null
 }

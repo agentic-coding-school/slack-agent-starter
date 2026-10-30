@@ -3,7 +3,8 @@ import { recordTranscript } from './db.ts'
 import type { Env } from './env.ts'
 import { canvasLinkText, checkCanvas, checkUpload, downloadHeaders, filesFromEvent, fileSharedIn, hostedOutsideSlack, looksLikeSignInPage, MAX_FILE_BYTES, verifyFileGrant } from './files.ts'
 import { parseModelCommand } from './models.ts'
-import { createCanvas, deleteMessage, fileInfo, postInThread, postMessage, react, updateMessage, uploadToThread, verifySlackSignature } from './slack.ts'
+import { checkSearch, normalise, publicOnly, resultsOf, searchArgs, searchErrorHint } from './search.ts'
+import { channelInfo, createCanvas, deleteMessage, fileInfo, postInThread, postMessage, react, slackApi, updateMessage, uploadToThread, verifySlackSignature } from './slack.ts'
 import { followUrl, parseStopClick, statusBlocks, statusLine } from './status.ts'
 import { threadStub } from './thread-state.ts'
 import { checkTranscriptSize, transcriptKey } from './transcripts.ts'
@@ -23,6 +24,7 @@ export { ThreadState } from './thread-state.ts'
  *   GET  /sandbox/file      A sandbox fetching one file sent in its thread, with that file's grant.
  *   POST /sandbox/upload    Claude posting a file into its own thread, with the turn's tools token.
  *   POST /sandbox/canvas    Claude posting a canvas into its own thread, same tools token.
+ *   POST /sandbox/search    Claude searching the workspace's PUBLIC channels, same tools token.
  *   queue                   Starts a turn in a sandbox (src/turn.ts).
  *
  * Plus the thread's alarm (src/thread-state.ts), which pauses quiet sandboxes.
@@ -38,6 +40,7 @@ export default {
     if (request.method === 'GET' && url.pathname === '/sandbox/file') return sandboxFile(request, env)
     if (request.method === 'POST' && url.pathname === '/sandbox/upload') return sandboxUpload(request, env)
     if (request.method === 'POST' && url.pathname === '/sandbox/canvas') return sandboxCanvas(request, env)
+    if (request.method === 'POST' && url.pathname === '/sandbox/search') return sandboxSearch(request, env)
     if (url.pathname === '/') return new Response('slack-agent is running. Point Slack at /slack/events.\n')
     return new Response('not found', { status: 404 })
   },
@@ -69,6 +72,8 @@ interface SlackEvent {
   channel: string
   channel_type?: string
   files?: unknown[]
+  /** Slack's search permission, on an @mention or a DM (src/search.ts). */
+  action_token?: string
 }
 
 async function slackEvents(request: Request, env: Env, ctx: ExecutionContext) {
@@ -112,6 +117,7 @@ async function slackEvents(request: Request, env: Env, ctx: ExecutionContext) {
     text: stripMention(event.text ?? '', botUserId),
     ...(hasFiles ? { hasFiles } : {}),
     ...(files.length ? { files } : {}),
+    ...(typeof event.action_token === 'string' && event.action_token ? { actionToken: event.action_token } : {}),
   }
 
   const thread = threadStub(env, event.channel, threadTs)
@@ -365,6 +371,37 @@ async function sandboxCanvas(request: Request, env: Env) {
     console.error(`turn ${turnId}: canvas failed:`, err)
     return Response.json({ ok: false, error: (err as Error).message }, { status: 502 })
   }
+}
+
+/**
+ * Workspace search for Claude (box/tools.mjs search), PUBLIC CHANNELS ONLY (src/search.ts). The
+ * token says which thread and turn; Slack's search permission comes from that thread's own records,
+ * and every result is checked to be from a public channel before it leaves.
+ */
+async function sandboxSearch(request: Request, env: Env) {
+  const body = (await request.json().catch(() => null)) as { turnId?: string } | null
+  const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
+  const verified = await verifyCallbackToken(env.CALLBACK_SECRET, token, body?.turnId ?? '', Date.now(), 'tools')
+  if (!verified.ok) return Response.json({ ok: false, error: verified.reason }, { status: 401 })
+
+  const checked = checkSearch(body)
+  if (!checked.ok) return Response.json({ ok: false, error: checked.error }, { status: 400 })
+
+  const { channel, threadTs, turnId } = verified.claims
+  const view = await threadStub(env, channel, threadTs).searchView(turnId)
+  if (!view.running) return Response.json({ ok: false, error: 'this turn is over' }, { status: 409 })
+
+  let json: Record<string, unknown>
+  try {
+    json = await slackApi(env, 'assistant.search.context', searchArgs(checked.query, checked.limit, view.actionToken))
+  } catch (err) {
+    const error = searchErrorHint((err as Error).message, Boolean(view.actionToken))
+    console.warn(`turn ${turnId}: search refused: ${error}`)
+    return Response.json({ ok: false, error }, { status: 502 })
+  }
+  const { hits, dropped } = await publicOnly(resultsOf(json).map(normalise), (id) => channelInfo(env, id))
+  if (dropped) console.warn(`turn ${turnId}: search dropped ${dropped} result(s) not from a public channel`)
+  return Response.json({ ok: true, results: hits })
 }
 
 /**

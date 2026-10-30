@@ -14,6 +14,7 @@ import {
   progressView,
   requeue,
   requestStop,
+  searchView,
   setStatus,
   type AcceptResult,
   type FinishResult,
@@ -111,6 +112,11 @@ export class ThreadState extends DurableObject<Env> {
   /** Read-only: what a progress report from the sandbox needs, follow-ups for the turn included. */
   async progress(turnId: string): Promise<ProgressView> {
     return progressView(await this.ctx.storage.get<ThreadData>('thread'), turnId)
+  }
+
+  /** Read-only: the running turn's search permission, for the search door (rule 8). */
+  async searchView(turnId: string) {
+    return searchView(await this.ctx.storage.get<ThreadData>('thread'), turnId)
   }
 
   async alarm() {

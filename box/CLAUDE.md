@@ -29,6 +29,17 @@ leave it for later.
 - Both post into this thread only, and both print the link. Mention what you posted in your reply;
   do not paste the whole file into it as well.
 
+## Searching Slack
+
+- To find what people said elsewhere in the workspace:
+  `node ~/.agent/tools.mjs search "what did we decide about the launch date?" --limit 10`
+- It searches PUBLIC channels only. Private channels and DMs are never searched, so "nothing found"
+  means nothing in a public channel. Say that when it matters.
+- A question in plain words works better than a list of keywords. Search a few times at most per
+  question: Slack rate-limits it hard. Cite the links of the messages you used.
+- Slack lets the bot search only in a turn started by an @mention or a DM. If search says so, ask
+  the person to @mention you again.
+
 ## This sandbox
 
 - It is Linux with Node, git, `gh`, `jq` and `ripgrep`. You can install more with `sudo apt-get`.

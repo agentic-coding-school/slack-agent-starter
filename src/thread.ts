@@ -26,6 +26,9 @@
  *    took it AND the turn ended with an answer. Every other case (not taken in time, the turn
  *    failed, was stopped or was lost) puts it back in `pending`, so it runs as the next turn. A
  *    race can cost a second answer; it can never cost a message.
+ * 8. SEARCH USES THE TURN'S NEWEST ACTION TOKEN. Slack lets the bot search only with the
+ *    `action_token` from an @mention or DM event, and it expires soon after. The running turn keeps
+ *    the newest one its messages or follow-ups carried; the search door reads it, nothing else.
  */
 
 import type { SlackFileRef } from './files.ts'
@@ -39,6 +42,11 @@ export interface SlackMessage {
   hasFiles?: boolean
   /** The files, for the turn to download (src/files.ts). */
   files?: SlackFileRef[]
+  /**
+   * Slack's short-lived search permission from this message's event (src/search.ts). Kept by the
+   * Worker; it never goes into a prompt or a sandbox.
+   */
+  actionToken?: string
 }
 
 export interface Turn {
@@ -86,6 +94,8 @@ export interface RunningTurn {
   model?: ModelAlias
   /** Follow-ups handed to this turn while it runs (rule 7), oldest first. */
   inbox?: SlackMessage[]
+  /** The newest search permission among the turn's messages and follow-ups (rule 8). */
+  actionToken?: string
 }
 
 /** How many message ids to remember for dedupe. Slack retries within minutes, not days. */
@@ -128,6 +138,7 @@ export function accept(data: ThreadData, msg: SlackMessage, opts: Clock & { ment
 
   if (data.running && canJoinRunningTurn(data, msg)) {
     data.running.inbox = [...(data.running.inbox ?? []), msg]
+    if (msg.actionToken) data.running.actionToken = msg.actionToken
     return { action: 'midturn' }
   }
   if (data.running || data.pausing) {
@@ -290,6 +301,16 @@ export function progressView(data: ThreadData | undefined, turnId: string): Prog
   return { running: true, startedAt, statusTs, stop: Boolean(stopRequestedBy), inbox: stopRequestedBy ? [] : (inbox ?? []) }
 }
 
+/**
+ * What the search door needs (rule 8): is `turnId` the turn running now, and the search permission
+ * it holds, if any. A finished turn's sandbox gets nothing, so a late call cannot search.
+ */
+export function searchView(data: ThreadData | undefined, turnId: string): { running: false } | { running: true; actionToken?: string } {
+  if (data?.running?.turnId !== turnId) return { running: false }
+  const { actionToken } = data.running
+  return actionToken ? { running: true, actionToken } : { running: true }
+}
+
 export type AlarmResult =
   | { action: 'none' }
   | { action: 'wait'; until: number }
@@ -347,7 +368,8 @@ function takePending(data: ThreadData, opts: Clock): Turn | null {
 function begin(data: ThreadData, messages: SlackMessage[], firstTurn: boolean, opts: Clock): Turn {
   const turnId = opts.newTurnId()
   const model = resolveModel(data.model)
-  data.running = { turnId, startedAt: opts.now, model }
+  const actionToken = messages.findLast((m) => m.actionToken)?.actionToken
+  data.running = { turnId, startedAt: opts.now, model, ...(actionToken ? { actionToken } : {}) }
   data.parked = false
   return { turnId, messages, firstTurn, startedAt: opts.now, model }
 }
