@@ -194,6 +194,9 @@ putSecret('SANDBOX_API_KEY', answers.SANDBOX_API_KEY)
 putSecret(claudeName, answers[claudeName])
 // Generated once. Replacing it would cut off any turn that is running right now.
 if (!have.has('CALLBACK_SECRET')) putSecret('CALLBACK_SECRET', randomBytes(32).toString('hex'))
+// Encrypts per-channel secrets (src/channels.ts). Generated once, like CALLBACK_SECRET: replacing it
+// would make every channel secret already stored unreadable.
+if (!have.has('CHANNEL_SECRETS_KEY')) putSecret('CHANNEL_SECRETS_KEY', randomBytes(32).toString('hex'))
 
 const next = []
 if (workerUrl) {

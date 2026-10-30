@@ -9,8 +9,8 @@
  *    next turn takes every waiting message at once.
  * 2. EACH SLACK MESSAGE RUNS ONCE. Slack sends a mention twice (as `app_mention` and as `message`)
  *    and retries anything we answer slowly, so messages are deduped by their `ts`.
- * 3. A THREAD STARTS WITH A MENTION. After that, every reply in the thread goes to the bot, with or
- *    without a mention.
+ * 3. A THREAD STARTS WITH A MENTION, or with a root message in a watched channel (src/channels.ts).
+ *    After that, every reply in the thread goes to the bot, with or without a mention.
  * 4. NO TURN STARTS WHILE THE SANDBOX IS BEING PAUSED. A pause request that lands after a turn
  *    started would freeze that turn mid-run, so messages wait until the pause is done.
  * 5. A MODEL PICK IS NOT A TURN. `!model sonnet` sets the thread's model and gets a short reply;
@@ -29,6 +29,10 @@
  * 8. SEARCH USES THE TURN'S NEWEST ACTION TOKEN. Slack lets the bot search only with the
  *    `action_token` from an @mention or DM event, and it expires soon after. The running turn keeps
  *    the newest one its messages or follow-ups carried; the search door reads it, nothing else.
+ * 9. THE CHANNEL'S DEFAULT MODEL IS READ AS MESSAGES ARRIVE. The thread keeps the default the
+ *    newest message came with, and a turn's model is fixed from it when the turn starts (rule 5):
+ *    the thread's own `!model` pick, then that default, then opus. A message whose channel settings
+ *    could not be read leaves the remembered default alone.
  */
 
 import type { SlackFileRef } from './files.ts'
@@ -74,8 +78,10 @@ export interface ThreadData {
   parked: boolean
   /** Set while a pause call is in flight (rule 4). */
   pausing: boolean
-  /** The thread's `!model` pick. Unset means the default. */
+  /** The thread's `!model` pick. Unset means the channel's default (rule 9). */
   model?: ModelAlias
+  /** The channel's default model, as of the newest message (rule 9). Unset means opus. */
+  channelModel?: ModelAlias
   /**
    * Set when a `!model` message made the thread ours before any turn ran, so the first real turn
    * still reads the earlier messages. Cleared once a turn finishes.
@@ -106,6 +112,23 @@ export const LOST_TURN_MARGIN_MS = 5 * 60_000
 
 type Clock = { now: number; newTurnId: () => string }
 
+/**
+ * What the events route read from the channel's settings for this message (rule 9). `undefined`
+ * means it could not read them, and the thread keeps what it had; `null` means no default.
+ */
+export type ChannelModel = ModelAlias | null | undefined
+
+function noteChannelModel(data: ThreadData, channelModel: ChannelModel) {
+  if (channelModel === undefined) return
+  if (channelModel === null) delete data.channelModel
+  else data.channelModel = channelModel
+}
+
+/** The model the thread's next turn runs on (rules 5 and 9). */
+export function threadModel(data: ThreadData): ModelAlias {
+  return resolveModel(data.model, data.channelModel)
+}
+
 export function emptyThread(channel: string, threadTs: string, origin: string): ThreadData {
   return {
     channel,
@@ -127,11 +150,12 @@ export type AcceptResult =
   | { action: 'midturn' }
   | { action: 'start'; turn: Turn }
 
-export function accept(data: ThreadData, msg: SlackMessage, opts: Clock & { mention: boolean }): AcceptResult {
+export function accept(data: ThreadData, msg: SlackMessage, opts: Clock & { mention: boolean; channelModel?: ChannelModel }): AcceptResult {
   if (!data.known && !opts.mention) return { action: 'skip', reason: 'not-our-thread' }
   if (data.seen.includes(msg.ts)) return { action: 'skip', reason: 'duplicate' }
 
   remember(data, msg.ts)
+  noteChannelModel(data, opts.channelModel)
   data.lastActivityAt = opts.now
   const firstTurn = !data.known || data.historyUnread === true
   data.known = true
@@ -157,7 +181,7 @@ export function canJoinRunningTurn(data: ThreadData, msg: SlackMessage): boolean
   const running = data.running
   if (!running || running.stopRequestedBy || msg.hasFiles) return false
   if (data.pending.length) return false
-  return running.model !== undefined && running.model === resolveModel(data.model)
+  return running.model !== undefined && running.model === threadModel(data)
 }
 
 export type ModelCommandResult = { action: 'skip'; reason: string } | { action: 'reply'; text: string }
@@ -171,11 +195,12 @@ export function applyModelCommand(
   data: ThreadData,
   msg: SlackMessage,
   command: ModelCommand,
-  opts: { now: number; mention: boolean },
+  opts: { now: number; mention: boolean; channelModel?: ChannelModel },
 ): ModelCommandResult {
   if (!data.known && !opts.mention) return { action: 'skip', reason: 'not-our-thread' }
   if (data.seen.includes(msg.ts)) return { action: 'skip', reason: 'duplicate' }
   remember(data, msg.ts)
+  noteChannelModel(data, opts.channelModel)
   data.lastActivityAt = opts.now
   if (!data.known) {
     data.known = true
@@ -186,7 +211,8 @@ export function applyModelCommand(
     return { action: 'reply', text: `I don't know the model \`${command.given.replaceAll('`', '')}\`. Pick one of ${modelChoices()}.` }
   }
   if (command.kind === 'show') {
-    return { action: 'reply', text: `This thread uses ${describeModel(resolveModel(data.model))}. Change it with \`!model <name>\` (${modelChoices()}).` }
+    const source = data.model ? '' : data.channelModel ? ", the channel's default" : ''
+    return { action: 'reply', text: `This thread uses ${describeModel(threadModel(data))}${source}. Change it with \`!model <name>\` (${modelChoices()}).` }
   }
   data.model = command.alias
   const when = data.running ? ' from the next turn (the one running now keeps its model)' : ''
@@ -367,7 +393,7 @@ function takePending(data: ThreadData, opts: Clock): Turn | null {
 
 function begin(data: ThreadData, messages: SlackMessage[], firstTurn: boolean, opts: Clock): Turn {
   const turnId = opts.newTurnId()
-  const model = resolveModel(data.model)
+  const model = threadModel(data)
   const actionToken = messages.findLast((m) => m.actionToken)?.actionToken
   data.running = { turnId, startedAt: opts.now, model, ...(actionToken ? { actionToken } : {}) }
   data.parked = false

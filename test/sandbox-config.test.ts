@@ -83,3 +83,14 @@ test('memory: the sandbox never gets a token for the memory repo', () => {
   assert.doesNotMatch(turn, /mintInstallationToken/)
   assert.doesNotMatch(source, /MEMORY_REPO|mintInstallationToken/)
 })
+
+test("channel secrets: only the turn's own channel's, spread first so no built-in env can be overridden", () => {
+  // The first entry of the runner's envs; everything after it wins over a secret of the same name.
+  assert.match(source, /envs: {\s*\n(\s*\/\/.*\n)*\s*\.\.\.launch\.channelEnvs,\s*\n\s*\.\.\.launch\.claudeEnvs,/)
+  assert.doesNotMatch(source, /CHANNEL_SECRETS_KEY/)
+  const turn = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'turn.ts'), 'utf8')
+  // The channel comes from the queued job, never from anything the sandbox sent.
+  assert.match(turn, /const { channel, threadTs, turn } = job/)
+  assert.match(turn, /channelSecretsForTurn\(env, channel\)/)
+  assert.match(turn, /channelEnvs: secrets\.envs/)
+})

@@ -17,6 +17,7 @@ import {
   searchView,
   setStatus,
   type AcceptResult,
+  type ChannelModel,
   type FinishResult,
   type ModelCommandResult,
   type Outcome,
@@ -44,19 +45,27 @@ const REQUEUE_DELAY_MS = 10_000
  * reported back, and retries a turn whose job could not be queued.
  */
 export class ThreadState extends DurableObject<Env> {
-  async accept(channel: string, threadTs: string, origin: string, msg: SlackMessage, mention: boolean): Promise<AcceptResult> {
+  async accept(channel: string, threadTs: string, origin: string, msg: SlackMessage, mention: boolean, channelModel?: ChannelModel): Promise<AcceptResult> {
     const data = await this.load(channel, threadTs, origin)
     data.origin = origin
-    const result = accept(data, msg, { mention, ...this.clock() })
+    const result = accept(data, msg, { mention, channelModel, ...this.clock() })
     if (result.action !== 'skip') await this.save(data)
     if (result.action === 'start') await this.armAlarm(data)
     return result
   }
 
   /** A `!model` message. Never starts a turn; the caller posts the reply. */
-  async modelCommand(channel: string, threadTs: string, origin: string, msg: SlackMessage, command: ModelCommand, mention: boolean): Promise<ModelCommandResult> {
+  async modelCommand(
+    channel: string,
+    threadTs: string,
+    origin: string,
+    msg: SlackMessage,
+    command: ModelCommand,
+    mention: boolean,
+    channelModel?: ChannelModel,
+  ): Promise<ModelCommandResult> {
     const data = await this.load(channel, threadTs, origin)
-    const result = applyModelCommand(data, msg, command, { mention, now: Date.now() })
+    const result = applyModelCommand(data, msg, command, { mention, channelModel, now: Date.now() })
     if (result.action !== 'skip') await this.save(data)
     return result
   }

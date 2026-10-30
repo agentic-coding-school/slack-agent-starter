@@ -35,6 +35,12 @@ paste a secret into the chat; secrets go in `.env.setup`.
   drops anything Slack does not call a public channel. Slack lets a bot token search only with the
   `action_token` from an @mention or DM event; the thread keeps it (rule 8 in `src/thread.ts`) and it
   never enters the sandbox. Never add a user token for search.
+- Channel settings (`src/channels.ts` rules, `src/channel-store.ts` D1): watched channels, the
+  channel's default model (rule 9 in `src/thread.ts`), and per-channel secrets. Secrets are set only
+  from the web UI, never from Slack; they are AES-GCM encrypted with `CHANNEL_SECRETS_KEY`, bound to
+  their channel and name, and handed to a turn by the job's own channel (`src/turn.ts`). In
+  `src/sandbox.ts` they are spread FIRST into the runner's envs so no built-in can be overridden,
+  and reserved names are refused (`checkSecretName`). Never return a value to a page or a log.
 - Memory (`src/memory.ts`, `src/memory-store.ts`, `box/memory.mjs`) is Claude Code's own auto memory
   kept in the `MEMORY_REPO` git repo, one folder per channel. The Worker picks the folder from the
   token's channel and commits through GitHub's API with a token for that repo only; the sandbox never

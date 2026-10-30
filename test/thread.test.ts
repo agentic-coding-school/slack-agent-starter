@@ -448,3 +448,53 @@ test('settleInbox keeps order and splits on taken', () => {
   assert.deepEqual(r.returned.map((m) => m.ts), ['2.0'])
   assert.deepEqual(settleInbox(inbox, { answered: false, taken: ['1.0'] }).returned.length, 3)
 })
+
+// Rule 9: the channel's default model (src/channels.ts), read as messages arrive.
+test("a turn runs on the channel's default unless the thread picked its own model", () => {
+  const data = fresh()
+  const newTurnId = ids()
+  const first = accept(data, msg('100.0'), { mention: true, channelModel: 'sonnet', now: 1, newTurnId })
+  assert.ok(first.action === 'start')
+  assert.equal(first.turn.model, 'sonnet')
+  finish(data, first.turn.turnId, { answered: true, now: 2, newTurnId })
+
+  applyModelCommand(data, msg('100.5', '!model haiku'), { kind: 'set', alias: 'haiku' }, { mention: false, channelModel: 'sonnet', now: 3 })
+  const second = accept(data, msg('101.0'), { mention: false, channelModel: 'sonnet', now: 4, newTurnId })
+  assert.ok(second.action === 'start')
+  assert.equal(second.turn.model, 'haiku', 'the thread pick wins')
+})
+
+test('a cleared channel default goes back to opus; an unread one keeps what the thread had', () => {
+  const data = fresh()
+  const newTurnId = ids()
+  const first = accept(data, msg('100.0'), { mention: true, channelModel: 'sonnet', now: 1, newTurnId })
+  assert.ok(first.action === 'start')
+  finish(data, first.turn.turnId, { answered: true, now: 2, newTurnId })
+
+  // D1 could not be read: the remembered default stays.
+  const second = accept(data, msg('101.0'), { mention: false, channelModel: undefined, now: 3, newTurnId })
+  assert.ok(second.action === 'start')
+  assert.equal(second.turn.model, 'sonnet')
+  finish(data, second.turn.turnId, { answered: true, now: 4, newTurnId })
+
+  const third = accept(data, msg('102.0'), { mention: false, channelModel: null, now: 5, newTurnId })
+  assert.ok(third.action === 'start')
+  assert.equal(third.turn.model, 'opus')
+})
+
+test("`!model` with no name says when the thread is on the channel's default", () => {
+  const data = fresh()
+  const show = applyModelCommand(data, msg('100.0', '!model'), { kind: 'show' }, { mention: true, channelModel: 'haiku', now: 1 })
+  assert.ok(show.action === 'reply')
+  assert.match(show.text, /haiku.*channel's default/)
+})
+
+test('a follow-up joins the running turn only while the channel default still matches its model', () => {
+  const data = fresh()
+  const newTurnId = ids()
+  const first = accept(data, msg('100.0'), { mention: true, channelModel: 'sonnet', now: 1, newTurnId })
+  assert.ok(first.action === 'start')
+  assert.deepEqual(accept(data, msg('101.0'), { mention: false, channelModel: 'sonnet', now: 2, newTurnId }), { action: 'midturn' })
+  // The default changed on the Channels page mid-turn: the next message waits for a turn of its own.
+  assert.deepEqual(accept(data, msg('102.0'), { mention: false, channelModel: 'haiku', now: 3, newTurnId }), { action: 'queued' })
+})

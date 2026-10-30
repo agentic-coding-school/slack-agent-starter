@@ -1,4 +1,6 @@
 import { verifyCallbackToken } from './callback-token.ts'
+import { channelSettings } from './channel-store.ts'
+import { startsWatchedThread } from './channels.ts'
 import { recordTranscript } from './db.ts'
 import type { Env } from './env.ts'
 import { canvasLinkText, checkCanvas, checkUpload, downloadHeaders, filesFromEvent, fileSharedIn, hostedOutsideSlack, looksLikeSignInPage, MAX_FILE_BYTES, verifyFileGrant } from './files.ts'
@@ -109,7 +111,16 @@ async function slackEvents(request: Request, env: Env, ctx: ExecutionContext) {
   if (event.type !== 'app_mention' && event.type !== 'message') return new Response('ok')
 
   const isDm = event.channel_type === 'im'
-  const mention = isDm || event.type === 'app_mention' || Boolean(botUserId && event.text?.includes(`<@${botUserId}>`))
+  const mentioned = isDm || event.type === 'app_mention' || Boolean(botUserId && event.text?.includes(`<@${botUserId}>`))
+  // Watched channels and the channel's default model (src/channels.ts). If D1 cannot answer, the
+  // message is handled as if the channel had no settings, and the thread keeps the model it had.
+  const settings = await channelSettings(env, event.channel).catch((err) => {
+    console.warn(`could not read the settings of ${event.channel}:`, (err as Error).message)
+    return null
+  })
+  // In a watched channel a root message starts a thread as a mention would.
+  const mention = mentioned || startsWatchedThread({ threadTs: event.thread_ts, isDm }, settings ?? { watched: false })
+  const channelModel = settings ? settings.model : undefined
   // A top-level channel message with no mention is not for us; skip it before touching any state.
   if (!mention && !event.thread_ts) return new Response('ok')
 
@@ -130,14 +141,14 @@ async function slackEvents(request: Request, env: Env, ctx: ExecutionContext) {
 
   const command = parseModelCommand(msg.text)
   if (command) {
-    const reply = await thread.modelCommand(event.channel, threadTs, origin, msg, command, mention)
+    const reply = await thread.modelCommand(event.channel, threadTs, origin, msg, command, mention, channelModel)
     if (reply.action === 'reply') {
       ctx.waitUntil(postInThread(env, event.channel, threadTs, reply.text).catch((err) => console.error('could not post the model reply:', err)))
     }
     return new Response('ok')
   }
 
-  const result = await thread.accept(event.channel, threadTs, origin, msg, mention)
+  const result = await thread.accept(event.channel, threadTs, origin, msg, mention, channelModel)
   if (result.action === 'start') {
     try {
       await env.TURNS.send({ channel: event.channel, threadTs, origin, turn: result.turn })

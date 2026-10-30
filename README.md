@@ -48,7 +48,9 @@ It asks the same questions in the terminal. The Slack app needs your Worker URL,
 deploys the Worker and tells you how to make the app; then you run `npm run setup` again with the
 Slack secrets. Every step is safe to repeat.
 
-Every secret is stored with `wrangler secret put`. None of them go in a file in this repo.
+Every secret is stored with `wrangler secret put`. None of them go in a file in this repo. Setup
+makes two random ones once and keeps them: `CALLBACK_SECRET` (signs the sandbox's tokens) and
+`CHANNEL_SECRETS_KEY` (encrypts channel secrets; replacing it makes every stored channel secret unreadable).
 
 When it is done, invite the bot to a channel (`/invite @percy-jr`) and @mention it.
 
@@ -155,6 +157,15 @@ gets a token for the memory repo; see [Memory](#memory).
   `action_token` it puts on an @mention or a DM, so search works in turns started that way; a
   follow-up typed without a mention may be refused, and Claude asks for a mention. The thread keeps
   the token; it never enters the sandbox.
+- **Watched channels answer without a mention.** A channel you mark as watched on the web UI's
+  Channels page gets an answer to every new root message, no @mention needed. Elsewhere a thread
+  starts with an @mention. Either way, replies in a thread the bot answers reach it without one.
+- **Channel secrets reach that channel only.** On the same page you can give a channel secrets
+  (say, an API key its work needs). They are stored encrypted (AES-GCM) in D1 with the Worker secret
+  `CHANNEL_SECRETS_KEY`, and only that channel's sandboxes get them, as environment variables for
+  Claude. Claude is told their names, never their values. Treat a secret as readable by anyone who
+  can talk to the bot in that channel: Claude can print its own environment. They are never set
+  from Slack, and the page shows names only.
 - **It remembers, per channel.** Claude Code's own auto memory writes notes into a folder, and the
   bot keeps that folder in your memory repo, one folder per channel. See [Memory](#memory).
 - **The Slack token never enters the sandbox.** The sandbox gets a token that can post one turn's answer
@@ -176,6 +187,8 @@ gets a token for the memory repo; see [Memory](#memory).
 | `src/transcripts.ts` | The transcript backup rules: the R2 key, the size limit |
 | `src/files.ts` | The file rules, both ways: grants, caps, the checks on uploads and canvases |
 | `src/search.ts` | The search rules: public channels only, the request Slack gets, the result shape |
+| `src/channels.ts` | The channel rules: watched channels, the default model, secret names and their encryption |
+| `src/channel-store.ts` | Reads and writes channel settings and encrypted secrets in D1 |
 | `src/db.ts` | The D1 database helpers |
 | `migrations/` | The D1 tables. `npm run setup` applies them |
 | `box/run-turn.mjs` | Runs inside the sandbox: runs Claude, reports progress, posts the answer back |
@@ -191,8 +204,9 @@ gets a token for the memory repo; see [Memory](#memory).
 
 Each thread runs on **Opus** unless you say otherwise. Send `!model sonnet` (or `opus`, `haiku`) in
 the thread, on its own, to switch; `!model` alone shows the current one. A turn that is already
-running keeps its model, and the switch applies from the next turn. The aliases and the model ids
-they map to live in `src/models.ts`.
+running keeps its model, and the switch applies from the next turn. A channel can have its own
+default model, set on the web UI's Channels page; a thread's `!model` pick still wins over it. The
+aliases and the model ids they map to live in `src/models.ts`.
 
 ## Memory
 

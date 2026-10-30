@@ -1,4 +1,5 @@
 import { signCallbackToken } from './callback-token.ts'
+import { channelSecretsForTurn } from './channel-store.ts'
 import { claudeAuth, maxTurnMs, type Env } from './env.ts'
 import { manifestFor } from './files.ts'
 import { githubMissing, mintTurnToken } from './github.ts'
@@ -66,8 +67,13 @@ export async function runTurnJob(env: Env, job: TurnJob, attempt: number, maxAtt
       githubNote = `\n(GitHub access failed for this turn: ${(err as Error).message})`
     }
 
+    // This channel's secrets, by the job's own channel: no other channel's ever reach this sandbox.
+    // A database error is retried like any other; a missing key only costs the turn its secrets.
+    const secrets = await channelSecretsForTurn(env, channel)
+
     const history = turn.firstTurn ? await threadHistory(env, channel, threadTs, turn.messages[0].ts) : []
-    const prompt = buildPrompt({ messages: turn.messages, history, githubEnabled: Boolean(githubToken) }) + githubNote
+    const prompt =
+      buildPrompt({ messages: turn.messages, history, githubEnabled: Boolean(githubToken) }) + githubNote + (secrets.note ? `\n${secrets.note}` : '')
 
     // The time limit counts from when the thread started the turn, not from this launch, so a
     // launch delayed by queue retries cannot outlive the thread's lost-turn alarm.
@@ -97,6 +103,7 @@ export async function runTurnJob(env: Env, job: TurnJob, attempt: number, maxAtt
       // A job queued before models existed has no model; modelId falls back to the default.
       model: modelId(turn.model),
       claudeEnvs: auth.envs,
+      channelEnvs: secrets.envs,
       githubToken,
       deadline,
     })

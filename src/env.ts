@@ -29,6 +29,10 @@ export interface Env {
   // Signs the token a sandbox uses to post its reply back. Any long random string.
   CALLBACK_SECRET: string
 
+  // Encrypts per-channel secrets in D1 (src/channels.ts). 64 hex characters, made once by
+  // `npm run setup`. Changing it makes every stored channel secret unreadable.
+  CHANNEL_SECRETS_KEY?: string
+
   // GitHub App, REQUIRED. The bot's memory lives in a repo it reaches through the App, and the
   // same App lets it open pull requests. A turn refuses to start without it (src/github.ts).
   GITHUB_APP_ID: string

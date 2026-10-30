@@ -133,6 +133,8 @@ export interface Launch {
   /** The Claude model id for `claude --model`. */
   model: string
   claudeEnvs: Record<string, string>
+  /** The channel's secrets (src/channels.ts), for Claude. Only this channel's. */
+  channelEnvs: Record<string, string>
   githubToken: string | null
   /** When the turn must end, in ms since the epoch. */
   deadline: number
@@ -183,6 +185,9 @@ export async function launchTurn(env: Env, launch: Launch) {
     background: true,
     timeoutMs: 0,
     envs: {
+      // FIRST, so every env below wins over a channel secret of the same name. The names are
+      // checked too (src/channels.ts checkSecretName); this is the second guard.
+      ...launch.channelEnvs,
       ...launch.claudeEnvs,
       ...(launch.githubToken ? { GH_TOKEN: launch.githubToken } : {}),
       HISTFILE: '/dev/null',
