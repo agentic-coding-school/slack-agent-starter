@@ -58,6 +58,20 @@ test('next run: every minute, and a weekly time in a time zone across daylight s
   assert.equal(iso(nextRunAt(cron('0 9 * * *'), 'UTC', at('2026-10-30T09:00:00Z'))), '2026-10-31T09:00:00.000Z')
 })
 
+test('next run: the hour the clocks go back is read twice, and a pinned time fires once', () => {
+  // New York, 1 Nov 2026: 01:30 EDT (05:30Z), then 01:30 EST (06:30Z). Only the first fires.
+  const ny = 'America/New_York'
+  assert.equal(iso(nextRunAt(cron('30 1 * * *'), ny, at('2026-11-01T04:00:00Z'))), '2026-11-01T05:30:00.000Z')
+  assert.equal(iso(nextRunAt(cron('30 1 * * *'), ny, at('2026-11-01T05:30:00Z'))), '2026-11-02T06:30:00.000Z')
+  // London, 25 Oct 2026: 01:15 BST (00:15Z), then 01:15 GMT (01:15Z).
+  assert.equal(iso(nextRunAt(cron('15 1 * * *'), 'Europe/London', at('2026-10-25T00:15:00Z'))), '2026-10-26T01:15:00.000Z')
+  // Lord Howe goes back half an hour: 01:45 is read at 14:45Z and again at 15:15Z; the next is 6 Apr at +10:30.
+  assert.equal(iso(nextRunAt(cron('45 1 * * *'), 'Australia/Lord_Howe', at('2026-04-04T14:45:00Z'))), '2026-04-05T15:15:00.000Z')
+  // A routine that runs every hour keeps running through the repeated hour.
+  assert.equal(iso(nextRunAt(cron('30 * * * *'), ny, at('2026-11-01T05:30:00Z'))), '2026-11-01T06:30:00.000Z')
+  assert.equal(iso(nextRunAt(cron('* * * * *'), ny, at('2026-11-01T05:59:00Z'))), '2026-11-01T06:00:00.000Z')
+})
+
 test('both day fields set: a day matching either one fires, as in cron', () => {
   // The 13th, or any Friday. 2026-11-06 is a Friday, before the 13th.
   assert.equal(iso(nextRunAt(cron('0 0 13 * 5'), 'UTC', at('2026-11-01T00:00:00Z'))), '2026-11-06T00:00:00.000Z')

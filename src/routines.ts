@@ -183,13 +183,17 @@ const MINUTE = 60_000
  * comes within about ten years. Steps an hour at a time until the day and hour match, then jumps
  * to the matching minute. A daylight-saving change only moves the hour it is read in; every step
  * is checked again, so a jump never lands on a time that does not match.
+ *
+ * When the clocks go back, an hour is read twice. A routine pinned to an hour (anything but `*`
+ * in the hour field) fires only on the first reading, as Vixie cron does; one that runs every hour
+ * keeps running through both.
  */
 export function nextRunAt(cron: Cron, timeZone: string, after: number): number | null {
   let t = Math.floor(after / MINUTE) * MINUTE + MINUTE
   for (let i = 0; i < MAX_STEPS; i++) {
     const local = localTime(t, timeZone)
     if (dayMatches(cron, local) && cron.hours.has(local.hour)) {
-      if (cron.minutes.has(local.minute)) return t
+      if (cron.minutes.has(local.minute) && !(cron.hours.size < 24 && isRepeatedWallTime(t, local, timeZone))) return t
       const next = [...cron.minutes].filter((m) => m > local.minute).sort((a, b) => a - b)[0]
       if (next !== undefined) {
         t += (next - local.minute) * MINUTE
@@ -199,6 +203,17 @@ export function nextRunAt(cron: Cron, timeZone: string, after: number): number |
     t += (60 - local.minute) * MINUTE
   }
   return null
+}
+
+/** Shifts a fall-back can take: an hour almost everywhere, half an hour on Lord Howe, two in old rules. */
+const FALL_BACK_SHIFTS = [30 * MINUTE, 60 * MINUTE, 120 * MINUTE]
+
+/** True when the same local date and time was already read at an earlier instant: the repeated hour. */
+function isRepeatedWallTime(t: number, local: LocalTime, timeZone: string) {
+  return FALL_BACK_SHIFTS.some((shift) => {
+    const earlier = localTime(t - shift, timeZone)
+    return earlier.month === local.month && earlier.day === local.day && earlier.hour === local.hour && earlier.minute === local.minute
+  })
 }
 
 /** A run time as people in the routine's time zone read it: "Mon 3 Nov, 09:00 (Europe/London)". */
