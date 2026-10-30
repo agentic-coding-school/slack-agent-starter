@@ -186,6 +186,9 @@ gets a token for the memory repo; see [Memory](#memory).
   follow-pr <link>`, and the Worker records the PR against the thread in D1. GitHub's webhook then
   wakes that thread when CI fails or a person reviews or comments, and says so when the PR is merged
   or closed. See [Following PRs](#following-prs).
+- **It can open a Slack code channel (beta).** Ask for one and Claude runs `node ~/.agent/tools.mjs
+  code-channel create "<name>"`: a channel linked to the thread, with tabs Claude writes (an HTML
+  page, a diff, Block Kit) and a session status. See [Code channels](#code-channels).
 - **It remembers, per channel.** Claude Code's own auto memory writes notes into a folder, and the
   bot keeps that folder in your memory repo, one folder per channel. See [Memory](#memory).
 - **The Slack token never enters the sandbox.** The sandbox gets a token that can post one turn's answer
@@ -216,13 +219,15 @@ gets a token for the memory repo; see [Memory](#memory).
 | `src/pr-follow.ts` | The PR-follow rules: the webhook signature, which events wake a thread, batching, the daily cap |
 | `src/pr-follow-store.ts` | Followed PRs in D1: follow, batch an event, claim a batch once, end on merge or close |
 | `src/pr-follow-fire.ts` | The GitHub webhook route, and the every-minute sweep that wakes a followed PR's thread |
+| `src/code-channels.ts` | The code-channel rules: the closed action set, the tab fields, nested creates, feature off |
+| `src/code-channel-door.ts` | The code-channel door's Slack calls: create, post, view, status, archive, summary |
 | `src/db.ts` | The D1 database helpers |
 | `migrations/` | The D1 tables. `npm run setup` applies them |
 | `box/run-turn.mjs` | Runs inside the sandbox: runs Claude, reports progress, posts the answer back |
 | `box/progress.mjs` | Runs inside the sandbox: turns Claude's stream events into the status line |
 | `box/memory.mjs` | Runs inside the sandbox: pulls the channel's notes before Claude starts and pushes what changed |
 | `box/files.mjs` | Runs inside the sandbox: downloads the turn's files before Claude starts |
-| `box/tools.mjs` | Runs inside the sandbox: Claude's commands to post a file or a canvas into its thread, to search public channels, to make and change routines, and to follow a PR |
+| `box/tools.mjs` | Runs inside the sandbox: Claude's commands to post a file or a canvas into its thread, to search public channels, to make and change routines, to follow a PR, and to drive a code channel |
 | `box/inbox.mjs`, `box/inbox-hook.mjs` | Runs inside the sandbox: follow-ups sent mid-turn, and the hook that hands them to Claude |
 | `box/CLAUDE.md` | The instructions Claude reads in the sandbox. Edit this to change the bot's behavior. |
 | `template/Dockerfile` | The sandbox image. Run `npm run template:build` after you change it. |
@@ -309,6 +314,32 @@ refused, and with the secret unset every delivery is. A comment on the PR can be
 who can see the repo, so the bot reads GitHub's text as information, never as orders. Each wake is a
 whole Claude turn, which is what the daily cap is for.
 
+## Code channels
+
+Slack's code channels are a **beta** feature: a channel bound to one agent session, with tabs the
+agent writes and a status. The manifest asks for them (`features.code_channels` and the scope
+`code_channels:manage`); if your workspace or app does not have the beta, the bot says so **once**
+in the thread and keeps working there.
+
+Claude has six actions and no others, through `/sandbox/code-channel` with its tools token:
+
+| Action | What it does |
+|---|---|
+| `create "<name>"` | Opens a code channel linked to the calling thread, invites the person who asked, and posts its link in the thread |
+| `post <C…> "<text>"` | Posts in a code channel, only one this app is the agent of |
+| `view <C…> <file>` | Sets a tab: `--type html`, `diff` or `block_kit`, `--name`, and `--key` to replace it later |
+| `status <C…> <status>` | `processing`, `active` or `suspended` |
+| `archive <C…>` | Closes the session and archives the channel, from the thread that opened it |
+| `summary "<text>"` | From a turn inside a code channel: posts into the thread Slack says opened it |
+
+- **No delete.** Nothing deletes a channel, a message or a tab, and nobody is removed.
+- **No code channel from a code channel.** Slack posts a "Context from #origin" message at the top
+  of a new code channel that quotes the origin message, @mention included. The bot ignores that
+  message, and a turn inside a code channel cannot open another one, so one channel never opens the
+  next in a loop. If Slack cannot say what the calling channel is, the create is refused.
+- **Talking to it there** works as anywhere else: @mention the bot in the code channel and it
+  answers in a thread.
+
 ## Transcript backups
 
 Every turn's transcript is copied to the R2 bucket `slack-agent-transcripts` and **never deleted**:
@@ -344,6 +375,9 @@ In `wrangler.jsonc` under `vars`. Run `npm run deploy` after you change one.
   `GITHUB_WEBHOOK_SECRET` differ; 503 means the secret is not set; "ignored: not followed" means
   Claude did not run `follow-pr`, or the PR was merged, closed or unfollowed. Check the App
   subscribes to the six events in "GitHub App", step 3.
+- **"Code channels are not turned on":** Slack refused the beta (`feature_disabled`,
+  `missing_scope`, `unknown_method`). Check the app has `code_channels:manage` and Code channels on
+  in its manifest and was reinstalled after; the workspace may simply not have the beta yet.
 - **"Invalid API key" from Claude:** the Claude secret is wrong or expired. Run
   `npx wrangler secret put CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) again.
 

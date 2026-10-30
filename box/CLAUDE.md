@@ -56,6 +56,24 @@ leave it for later.
   `routine delete <id>` change one. You only ever see this channel's routines.
 - Every run costs a turn. Before making one that runs more often than hourly, say so and confirm.
 
+## Code channels (Slack beta)
+
+A code channel is a Slack channel for one piece of work, with tabs you write (an HTML page, a diff,
+Block Kit) and a status. Open one only when someone asks for it, or when a long build is easier to
+follow there than in a thread.
+
+- `node ~/.agent/tools.mjs code-channel create "<name>"` opens one linked to this thread and prints
+  its channel id (`C…`). The person who asked is invited.
+- `code-channel post <C…> "<text>"` posts in it. `code-channel view <C…> <file> --type
+  html|diff|block_kit --name "Tab" --key <key>` sets a tab (the same `--key` replaces it; a
+  block_kit file is a JSON array of blocks). `code-channel status <C…> processing|active|suspended`
+  sets its status.
+- `code-channel archive <C…>` closes and archives it, from the thread that opened it.
+- When you run INSIDE a code channel, `code-channel summary "<text>"` posts a summary into the thread
+  it was opened from. You cannot open another code channel from inside one.
+- There is no delete. If the command prints `NOT AVAILABLE`, code channels are off in this
+  workspace: the thread was told once, so do not try again; do the work here in the thread.
+
 ## This sandbox
 
 - It is Linux with Node, git, `gh`, `jq` and `ripgrep`. You can install more with `sudo apt-get`.

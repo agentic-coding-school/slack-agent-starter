@@ -4,6 +4,8 @@ import { startsWatchedThread } from './channels.ts'
 import { recordTranscript } from './db.ts'
 import type { Env } from './env.ts'
 import { canvasLinkText, checkCanvas, checkUpload, downloadHeaders, filesFromEvent, fileSharedIn, hostedOutsideSlack, looksLikeSignInPage, MAX_FILE_BYTES, verifyFileGrant } from './files.ts'
+import { codeChannelAction } from './code-channel-door.ts'
+import { checkCodeChannelAction, isContextRoot } from './code-channels.ts'
 import { checkPush, MAX_TOTAL_BYTES } from './memory.ts'
 import { pullMemory, pushMemory } from './memory-store.ts'
 import { parseModelCommand } from './models.ts'
@@ -15,7 +17,7 @@ import { sweepRoutines } from './routine-fire.ts'
 import { createRoutine, deleteRoutine, listRoutines, setRoutineStatus } from './routine-store.ts'
 import { checkRoutineAction, checkTimezone, routineView } from './routines.ts'
 import { checkSearch, normalise, publicOnly, resultsOf, searchArgs, searchErrorHint } from './search.ts'
-import { channelInfo, createCanvas, deleteMessage, fileInfo, postInThread, postMessage, react, slackApi, updateMessage, uploadToThread, userTimezone, verifySlackSignature } from './slack.ts'
+import { channelInfo, createCanvas, deleteMessage, fileInfo, postInChannel, postInThread, postMessage, react, slackApi, updateMessage, uploadToThread, userTimezone, verifySlackSignature } from './slack.ts'
 import { followUrl, parseStopClick, statusBlocks, statusLine } from './status.ts'
 import { threadStub } from './thread-state.ts'
 import { checkTranscriptSize, transcriptKey } from './transcripts.ts'
@@ -42,6 +44,8 @@ export { ThreadState } from './thread-state.ts'
  *                           tools token (src/routines.ts).
  *   POST /sandbox/follow-pr Claude following a PR it opened, so GitHub can wake its THREAD, same
  *                           tools token (src/pr-follow.ts).
+ *   POST /sandbox/code-channel  Claude opening and driving a Slack code channel (beta), same tools
+ *                           token: create, post, view, status, archive, summary (src/code-channels.ts).
  *   POST /github/webhook    GitHub App events, signed with GITHUB_WEBHOOK_SECRET: CI failures,
  *                           reviews and comments on a followed PR, and its merge or close.
  *   queue                   Starts a turn in a sandbox (src/turn.ts).
@@ -66,6 +70,7 @@ export default {
     if (request.method === 'POST' && url.pathname === '/sandbox/search') return sandboxSearch(request, env)
     if (request.method === 'POST' && url.pathname === '/sandbox/routines') return sandboxRoutines(request, env)
     if (request.method === 'POST' && url.pathname === '/sandbox/follow-pr') return sandboxFollowPr(request, env)
+    if (request.method === 'POST' && url.pathname === '/sandbox/code-channel') return sandboxCodeChannel(request, env)
     if (request.method === 'POST' && url.pathname === '/github/webhook') return githubWebhook(request, env)
     if (url.pathname === '/') return new Response('slack-agent is running. Point Slack at /slack/events.\n')
     return new Response('not found', { status: 404 })
@@ -105,6 +110,7 @@ interface SlackEvent {
   files?: unknown[]
   /** Slack's search permission, on an @mention or a DM (src/search.ts). */
   action_token?: string
+  blocks?: unknown[]
 }
 
 async function slackEvents(request: Request, env: Env, ctx: ExecutionContext) {
@@ -132,6 +138,9 @@ async function slackEvents(request: Request, env: Env, ctx: ExecutionContext) {
   if (event.bot_id || !event.user || event.user === botUserId) return new Response('ok')
   if (event.subtype && !personSubtypes.has(event.subtype)) return new Response('ok')
   if (event.type !== 'app_mention' && event.type !== 'message') return new Response('ok')
+  // The Context root at the top of a new code channel quotes the origin message, @mention and all,
+  // as the person who opened it. Answering it would start a turn nobody asked for (src/code-channels.ts rule 4).
+  if (isContextRoot(event)) return new Response('ok')
 
   const isDm = event.channel_type === 'im'
   const mentioned = isDm || event.type === 'app_mention' || Boolean(botUserId && event.text?.includes(`<@${botUserId}>`))
@@ -547,6 +556,39 @@ async function sandboxFollowPr(request: Request, env: Env) {
   })
   console.log(`turn ${turnId} follows ${prName(pr)}`)
   return Response.json({ ok: true, webhook: Boolean(env.GITHUB_WEBHOOK_SECRET) })
+}
+
+/**
+ * Slack code channels for Claude (box/tools.mjs code-channel), src/code-channels.ts. The calling
+ * thread comes from the token: a new channel's origin is that thread, a summary goes where Slack
+ * says the channel came from, and the feature-off note goes into that thread once.
+ */
+async function sandboxCodeChannel(request: Request, env: Env) {
+  const body = (await request.json().catch(() => null)) as { turnId?: string } | null
+  const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
+  const verified = await verifyCallbackToken(env.CALLBACK_SECRET, token, body?.turnId ?? '', Date.now(), 'tools')
+  if (!verified.ok) return Response.json({ ok: false, error: verified.reason }, { status: 401 })
+
+  const checked = checkCodeChannelAction(body)
+  if (!checked.ok) return Response.json({ ok: false, error: checked.error }, { status: 400 })
+
+  const { channel, threadTs, turnId } = verified.claims
+  const thread = threadStub(env, channel, threadTs)
+  const view = await thread.authorView(turnId)
+  if (!view.running) return Response.json({ ok: false, error: 'this turn is over' }, { status: 409 })
+
+  const answer = await codeChannelAction(
+    {
+      slack: (method, args) => slackApi(env, method, args),
+      postInThread: (c, ts, text) => postInThread(env, c, ts, text),
+      postInChannel: (c, text) => postInChannel(env, c, text),
+      noteOnce: (key) => thread.noteOnce(turnId, key),
+    },
+    { channel, threadTs, ...(view.author ? { author: view.author } : {}) },
+    checked.value,
+  )
+  if (!answer.body.ok) console.warn(`turn ${turnId}: code-channel ${checked.value.action} refused: ${answer.body.error}`)
+  return Response.json(answer.body, { status: answer.status })
 }
 
 /**

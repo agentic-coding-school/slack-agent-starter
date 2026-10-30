@@ -7,6 +7,13 @@
 //   node ~/.agent/tools.mjs routine create --cron "0 9 * * 1" [--tz Europe/London] [--model sonnet] --prompt "What to do"
 //   node ~/.agent/tools.mjs routine list | pause <id> | resume <id> | delete <id>
 //   node ~/.agent/tools.mjs follow-pr <PR link> | unfollow-pr <PR link>
+//   node ~/.agent/tools.mjs code-channel create "<name>" | post <C…> "<text>" | status <C…> <status>
+//   node ~/.agent/tools.mjs code-channel view <C…> <file> [--type html|diff|block_kit] [--name "Tab"] [--key k]
+//   node ~/.agent/tools.mjs code-channel archive <C…> | summary "<text>"
+//
+// code-channel drives a Slack code channel (beta). There is no delete. A turn inside a code channel
+// cannot open another one. If Slack says the feature is off, the thread is told once and the
+// command says to keep working in the thread (src/code-channels.ts).
 //
 // follow-pr makes GitHub wake THIS thread when the PR's CI fails or a person reviews or comments on
 // it, until it is merged or closed. Only PRs this bot opened can be followed (src/pr-follow.ts).
@@ -35,7 +42,69 @@ export const USAGE = [
   '  node ~/.agent/tools.mjs routine pause|resume|delete <id>',
   '  node ~/.agent/tools.mjs follow-pr <PR link>',
   '  node ~/.agent/tools.mjs unfollow-pr <PR link>',
+  '  node ~/.agent/tools.mjs code-channel create "<name>"',
+  '  node ~/.agent/tools.mjs code-channel post <channel id> "<text>"',
+  '  node ~/.agent/tools.mjs code-channel view <channel id> <file> [--type html|diff|block_kit] [--name "Tab"] [--key key] [--base main] [--head branch]',
+  '  node ~/.agent/tools.mjs code-channel status <channel id> processing|active|suspended',
+  '  node ~/.agent/tools.mjs code-channel archive <channel id>',
+  '  node ~/.agent/tools.mjs code-channel summary "<text>"',
 ].join('\n')
+
+const CODE_ACTIONS = ['create', 'post', 'view', 'status', 'archive', 'summary']
+const VIEW_FLAGS = { '--type': 'type', '--name': 'tab', '--key': 'key', '--base': 'base', '--head': 'head' }
+
+/** `code-channel <action> ...`: the Worker checks the channel ids, the sizes and the fields. */
+function parseCodeChannel(rest) {
+  const [action, ...args] = rest
+  if (!CODE_ACTIONS.includes(action)) {
+    return { error: action ? `unknown code-channel action ${action}; the actions are ${CODE_ACTIONS.join(', ')}` : `code-channel needs an action: ${CODE_ACTIONS.join(', ')}` }
+  }
+  const flags = {}
+  const positional = []
+  for (let i = 0; i < args.length; i++) {
+    const name = VIEW_FLAGS[args[i]]
+    if (name && action === 'view') {
+      if (i + 1 >= args.length) return { error: `${args[i]} needs a value` }
+      flags[name] = args[++i]
+    } else if (args[i].startsWith('--')) {
+      return { error: `unknown option ${args[i]} for code-channel ${action}` }
+    } else {
+      positional.push(args[i])
+    }
+  }
+  const want = { create: ['name'], post: ['channel', 'text'], view: ['channel', 'path'], status: ['channel', 'status'], archive: ['channel'], summary: ['text'] }[action]
+  if (positional.length !== want.length) return { error: `code-channel ${action} takes ${want.join(' and ')}; quote text` }
+  const out = { command: 'code-channel', action }
+  want.forEach((key, i) => (out[key] = positional[i]))
+  if (action === 'view') {
+    if (flags.type && !['html', 'diff', 'block_kit'].includes(flags.type)) return { error: '--type is html, diff or block_kit' }
+    Object.assign(out, flags)
+  }
+  return out
+}
+
+/** The tab the Worker gets: a block_kit file is a JSON array of blocks (or `{ "blocks": [...] }`). */
+export function viewFrom(cmd, fileText) {
+  const view = { type: cmd.type ?? 'html' }
+  if (cmd.tab) view.name = cmd.tab
+  if (cmd.key) view.view_key = cmd.key
+  if (view.type === 'block_kit') {
+    let parsed
+    try {
+      parsed = JSON.parse(fileText)
+    } catch {
+      throw new Error(`${cmd.path} is not JSON; a block_kit tab is a JSON array of blocks`)
+    }
+    view.blocks = Array.isArray(parsed) ? parsed : parsed?.blocks
+    return view
+  }
+  view.content = fileText
+  if (view.type === 'diff') {
+    if (cmd.base) view.base_branch = cmd.base
+    if (cmd.head) view.head_branch = cmd.head
+  }
+  return view
+}
 
 const ROUTINE_FLAGS = { '--cron': 'cron', '--tz': 'timezone', '--model': 'model', '--prompt': 'prompt' }
 
@@ -77,6 +146,7 @@ function parseRoutine(rest) {
 export function parseArgs(argv) {
   const [command, ...rest] = argv
   if (command === 'routine') return parseRoutine(rest)
+  if (command === 'code-channel') return parseCodeChannel(rest)
   if (command === 'follow-pr' || command === 'unfollow-pr') {
     // The Worker checks the link; here only its shape.
     if (rest.length !== 1 || rest[0].startsWith('--')) return { error: `${command} takes one PR link, such as https://github.com/owner/repo/pull/12` }
@@ -190,6 +260,23 @@ export async function run(cmd, { env = process.env, fetchImpl = fetch } = {}) {
     ].join(' ')
   }
 
+  if (cmd.command === 'code-channel') {
+    const { action } = cmd
+    const payload = { turnId: env.TURN_ID, action }
+    for (const field of ['name', 'channel', 'text', 'status']) if (cmd[field] !== undefined) payload[field] = cmd[field]
+    if (action === 'view') payload.view = viewFrom(cmd, readFileSync(cmd.path, 'utf8'))
+    const res = await fetchImpl(new URL('/sandbox/code-channel', env.AGENT_API_URL), {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    const body = await res.json().catch(() => ({}))
+    // Feature off is not a failure to retry: the thread was told, and Claude carries on there.
+    if (body.fallback) return `NOT AVAILABLE: ${body.hint ?? 'Slack code channels are off here. Keep working in this thread.'}`
+    const out = await answer(res, body)
+    return codeChannelLine(action, out)
+  }
+
   const res = await fetchImpl(new URL('/sandbox/canvas', env.AGENT_API_URL), {
     method: 'POST',
     headers: { ...auth, 'content-type': 'application/json' },
@@ -228,9 +315,26 @@ export function formatRoutines(routines) {
   return lines.join('\n').trimEnd()
 }
 
-async function answer(res) {
-  const body = await res.json().catch(() => ({}))
-  if (!res.ok || !body.ok) throw new Error(`the Worker refused: ${body.error ?? res.status}`)
+/** What Claude reads after a code-channel action worked. */
+export function codeChannelLine(action, out) {
+  const ch = out.channel ? `<#${out.channel}>` : 'the channel'
+  if (action === 'create') {
+    return [
+      `Opened code channel ${out.channel} (${ch}).${out.originLinked === false ? ` It is not linked to this thread (${out.originError}).` : ''}`,
+      out.invited === false ? 'The person who asked could not be invited; tell them the channel name.' : '',
+      `Use its id with post, view, status and archive.`,
+    ].filter(Boolean).join(' ')
+  }
+  if (action === 'post') return `Posted in ${ch}.`
+  if (action === 'view') return `Set the tab in ${ch}${out.view_key ? ` (key ${out.view_key}; reuse it to replace this tab)` : ''}.`
+  if (action === 'status') return `Set ${ch} to ${out.status}.`
+  if (action === 'archive') return `Closed and archived ${ch}.`
+  return `Posted the summary in the thread this channel was opened from.`
+}
+
+async function answer(res, parsed) {
+  const body = parsed ?? (await res.json().catch(() => ({})))
+  if (!res.ok || !body.ok) throw new Error(`the Worker refused: ${body.error ?? res.status}${body.hint ? `. ${body.hint}` : ''}`)
   return body
 }
 

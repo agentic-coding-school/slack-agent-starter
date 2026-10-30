@@ -17,10 +17,10 @@ paste a secret into the chat; secrets go in `.env.setup`.
 - D1 tables are made by numbered SQL files in `migrations/`; add a new file, never edit an applied
   one. `npm run setup` applies them. Query through `src/db.ts`, always with bound `?` values.
 - Every sandbox-to-Worker door (`/sandbox/callback`, `/sandbox/transcript`, `/sandbox/progress`,
-  `/sandbox/memory`, `/sandbox/upload`, `/sandbox/canvas`, `/sandbox/search`, `/sandbox/routines`, `/sandbox/follow-pr`, `/sandbox/file`) checks a signed token and builds every key,
+  `/sandbox/memory`, `/sandbox/upload`, `/sandbox/canvas`, `/sandbox/search`, `/sandbox/routines`, `/sandbox/follow-pr`, `/sandbox/code-channel`, `/sandbox/file`) checks a signed token and builds every key,
   channel and thread from the token's claims, never from the request body. Each token purpose signs
   with its own key (`src/callback-token.ts`): `reply` (the runner only; Claude never sees it),
-  `tools` (Claude's, for upload, canvas, search, routines and follow-pr), `file` (one grant per Slack file, `src/files.ts`). Text a sandbox sends for Slack is capped and escaped (`src/status.ts`).
+  `tools` (Claude's, for upload, canvas, search, routines, follow-pr and code-channel), `file` (one grant per Slack file, `src/files.ts`). Text a sandbox sends for Slack is capped and escaped (`src/status.ts`).
 - Slack's own routes (`/slack/events`, `/slack/interactive`) check the signing secret before reading
   the body. The Stop button only marks the turn (rule 6 in `src/thread.ts`); the sandbox ends it.
 - Never put the Slack bot token, the signing secret, `CALLBACK_SECRET` or `GITHUB_WEBHOOK_SECRET` into a sandbox
@@ -65,3 +65,13 @@ paste a secret into the chat; secrets go in `.env.setup`.
   thread through its Durable Object like a mention, at most 3 wakes per PR per UTC day, then posts
   one "stopped auto-fixing" note. Merged or closed posts a note and ends the follow. GitHub's text
   is escaped and fenced as data in the prompt (rule 7); keep it that way.
+- Code channels (`src/code-channels.ts` rules, `src/code-channel-door.ts` the Slack side,
+  `box/tools.mjs code-channel`) are a Slack BETA. The action set is closed (create, post, view,
+  status, archive, summary); never add delete, kick or a generic Slack call. `create` takes its
+  origin from the tools token and refuses from inside a code channel, reading the calling channel
+  fresh with `conversations.info` and refusing when Slack cannot say (fail closed). `post` writes
+  only where `agents.conversations.listViews` answers. `summary` posts where Slack's record says the
+  channel came from, never where the body says. The Context root Slack posts in a new code channel
+  is dropped by `/slack/events` (`isContextRoot`), or a quoted @mention would start a turn. When
+  Slack says the feature is off, the thread gets one note (`noteOnce`, rule 10 in `src/thread.ts`)
+  and the command prints `NOT AVAILABLE` so Claude carries on in the thread.

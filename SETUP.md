@@ -103,6 +103,9 @@ works in.
 - If they have a test repo, ask the bot to open a small PR there. Its reply links the PR, and a
   comment on the PR from the human gets a :telescope: line in the thread about a minute later and a
   new turn. Merging it posts "stopped following".
+- Code channels are a Slack beta. Ask them to say "open a code channel for this" in a thread. A new
+  channel appears with a link in the thread, or, if the workspace does not have the beta, the bot
+  says once that code channels are off and answers in the thread instead. Either is a pass.
 - Ask them to tell the bot something worth keeping ("remember that we deploy with `npm run ship`"),
   then ask about it in a NEW thread in the same channel. The memory repo shows a commit named for
   the channel, and the new thread knows the answer.

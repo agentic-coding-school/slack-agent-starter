@@ -32,8 +32,16 @@ export async function verifySlackSignature(
   return timingSafeEqual(expected, new TextEncoder().encode(signature))
 }
 
-/** Slack's read methods take only form-encoded arguments; a JSON body reaches them empty. */
+/**
+ * Slack's read methods take only form-encoded arguments; a JSON body reaches them empty. The code
+ * channel methods (beta) go form-encoded too, as Slack's own SDK sends them.
+ */
 const FORM_METHODS = new Set([
+  'agents.conversations.create',
+  'agents.conversations.listViews',
+  'agents.conversations.setView',
+  'agents.conversations.archive',
+  'agents.sessions.setStatus',
   'conversations.replies',
   'conversations.history',
   'users.info',
@@ -52,7 +60,7 @@ export async function slackApi(env: Env, method: string, args: Record<string, un
       'content-type': form ? 'application/x-www-form-urlencoded' : 'application/json; charset=utf-8',
     },
     body: form
-      ? new URLSearchParams(Object.entries(args).map(([k, v]) => [k, String(v)]))
+      ? new URLSearchParams(Object.entries(args).map(([k, v]) => [k, formValue(v)]))
       : JSON.stringify(args),
   })
   const json = (await res.json()) as { ok: boolean; error?: string; [key: string]: unknown }
@@ -60,10 +68,22 @@ export async function slackApi(env: Env, method: string, args: Record<string, un
   return json
 }
 
+/** A form field: objects and arrays (Block Kit, a tab's blocks) as JSON, as Slack's SDK sends them. */
+export function formValue(v: unknown): string {
+  return v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v)
+}
+
 /** Posts Markdown into a thread as Slack mrkdwn, split into several messages when it is long. */
 export async function postInThread(env: Env, channel: string, threadTs: string, markdown: string) {
   for (const text of splitMessage(toMrkdwn(markdown))) {
     await slackApi(env, 'chat.postMessage', { channel, thread_ts: threadTs, text, unfurl_links: false })
+  }
+}
+
+/** Posts Markdown at the top level of a channel (a code channel's answer has no thread). */
+export async function postInChannel(env: Env, channel: string, markdown: string) {
+  for (const text of splitMessage(toMrkdwn(markdown))) {
+    await slackApi(env, 'chat.postMessage', { channel, text, unfurl_links: false })
   }
 }
 

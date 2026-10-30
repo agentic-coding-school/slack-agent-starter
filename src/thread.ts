@@ -33,6 +33,8 @@
  *    newest message came with, and a turn's model is fixed from it when the turn starts (rule 5):
  *    the thread's own `!model` pick, then that default, then opus. A message whose channel settings
  *    could not be read leaves the remembered default alone.
+ * 10. A THREAD IS TOLD SOMETHING ONCE. A note keyed in `notes` (say, "code channels are off here",
+ *    src/code-channels.ts rule 6) is posted the first time only, however many turns ask for it.
  */
 
 import type { SlackFileRef } from './files.ts'
@@ -87,6 +89,8 @@ export interface ThreadData {
    * still reads the earlier messages. Cleared once a turn finishes.
    */
   historyUnread?: boolean
+  /** The once-only notes this thread has been given (rule 10). */
+  notes?: string[]
 }
 
 export interface RunningTurn {
@@ -337,6 +341,17 @@ export function searchView(data: ThreadData | undefined, turnId: string): { runn
   if (data?.running?.turnId !== turnId) return { running: false }
   const { actionToken } = data.running
   return actionToken ? { running: true, actionToken } : { running: true }
+}
+
+/**
+ * Rule 10: true the first time `key` is asked for, when the caller posts the note; false after.
+ * Only a running turn can ask, so a stale sandbox cannot post into the thread.
+ */
+export function noteOnce(data: ThreadData | undefined, turnId: string, key: string): boolean {
+  if (!data || data.running?.turnId !== turnId) return false
+  if (data.notes?.includes(key)) return false
+  data.notes = [...(data.notes ?? []), key]
+  return true
 }
 
 /** Read-only: is the turn still running, and who asked for it (src/routines.ts rule 1). */

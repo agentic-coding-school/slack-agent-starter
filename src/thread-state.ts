@@ -11,6 +11,7 @@ import {
   applyModelCommand,
   emptyThread,
   finish,
+  noteOnce,
   LOST_TURN_MARGIN_MS,
   onAlarm,
   progressView,
@@ -150,6 +151,14 @@ export class ThreadState extends DurableObject<Env> {
   /** Read-only: whether the turn runs, and who asked for it, for the routines door. */
   async authorView(turnId: string) {
     return authorView(await this.ctx.storage.get<ThreadData>('thread'), turnId)
+  }
+
+  /** Rule 10: true once per key per thread, saved before the caller posts the note. */
+  async noteOnce(turnId: string, key: string): Promise<boolean> {
+    const data = await this.ctx.storage.get<ThreadData>('thread')
+    if (!noteOnce(data, turnId, key)) return false
+    await this.save(data!)
+    return true
   }
 
   async alarm() {
