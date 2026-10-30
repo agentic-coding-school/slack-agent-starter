@@ -19,7 +19,7 @@ paste a secret into the chat; secrets go in `.env.setup`.
 - Every sandbox-to-Worker door (`/sandbox/callback`, `/sandbox/transcript`, `/sandbox/progress`,
   `/sandbox/memory`, `/sandbox/upload`, `/sandbox/canvas`, `/sandbox/search`, `/sandbox/routines`, `/sandbox/follow-pr`, `/sandbox/code-channel`, `/sandbox/file`) checks a signed token and builds every key,
   channel and thread from the token's claims, never from the request body. Each token purpose signs
-  with its own key (`src/callback-token.ts`): `reply` (the runner only; Claude never sees it),
+  with its own key (`src/callback-token.ts`): `reply` (the runner's; kept out of Claude's env, but Claude shares its uid and sudo, so it is no wall: a transcript backup is write-once for that reason),
   `tools` (Claude's, for upload, canvas, search, routines, follow-pr and code-channel), `file` (one grant per Slack file, `src/files.ts`). Text a sandbox sends for Slack is capped and escaped (`src/status.ts`).
 - Slack's own routes (`/slack/events`, `/slack/interactive`) check the signing secret before reading
   the body. The Stop button only marks the turn (rule 6 in `src/thread.ts`); the sandbox ends it.

@@ -58,6 +58,12 @@ export interface Env {
    * (rule 5 in src/ui.ts). Empty, the UI is not set up.
    */
   UI_HOST?: string
+  /**
+   * The Worker's workers.dev address, `https://<name>.<subdomain>.workers.dev`, written by `npm run
+   * setup` from the deploy output. A routine made on the web UI reports back here (rule 6 in
+   * src/ui.ts). Empty, the UI cannot make routines.
+   */
+  WORKER_URL?: string
 
   MAX_TURN_MINUTES: string
   IDLE_PAUSE_MINUTES: string

@@ -656,7 +656,8 @@ async function sandboxMemoryPush(request: Request, env: Env) {
 /**
  * Stores one turn's transcript in R2. The body is the gzipped JSONL; the key comes from the
  * token's claims only (src/transcripts.ts), so a sandbox can write its own thread's backups and
- * nothing else. Each turn writes its own object, and nothing here can delete one.
+ * nothing else. Each turn writes its own object once: a second upload for the same turn is refused,
+ * and nothing here can delete or replace one.
  */
 async function sandboxTranscript(request: Request, env: Env) {
   const turnId = request.headers.get('x-turn-id') ?? ''
@@ -669,6 +670,8 @@ async function sandboxTranscript(request: Request, env: Env) {
 
   const { claims } = verified
   const key = transcriptKey(claims)
+  // Write-once: a backup is never replaced, so a leaked reply token cannot swap a stored one later.
+  if (await env.TRANSCRIPTS.head(key)) return Response.json({ ok: false, error: 'this turn\'s transcript is already stored' }, { status: 409 })
   const body = await request.arrayBuffer()
   await env.TRANSCRIPTS.put(key, body, {
     httpMetadata: { contentType: 'application/x-ndjson', contentEncoding: 'gzip' },

@@ -15,6 +15,10 @@
  *    lock Slack and GitHub out. So the UI lives on a custom domain (UI_HOST, attached to this Worker
  *    by `npm run setup`), Access covers that host, and Slack and GitHub stay on workers.dev. Every
  *    link to the UI uses UI_HOST. Without UI_HOST and Access both set, the UI is not set up.
+ * 6. A JOB NEVER POINTS AT THE UI HOST. A routine stores the origin its sandbox reports back to, and
+ *    the sandbox has no Access cookie, so on UI_HOST every report would land on Access's sign-in
+ *    page and the answer would be lost. A routine made on the UI takes WORKER_URL (the workers.dev
+ *    address, written by `npm run setup`), never the address the page was loaded from.
  */
 
 import { accessConfig } from './access.ts'
@@ -46,6 +50,23 @@ export function normaliseUiHost(raw: string | undefined): string | null {
 export function uiOrigin(env: { UI_HOST?: string; ACCESS_TEAM_DOMAIN?: string; ACCESS_AUD?: string }): string | null {
   const host = normaliseUiHost(env.UI_HOST)
   return host && accessConfig(env) ? `https://${host}` : null
+}
+
+/**
+ * Rule 6: the Worker's own (workers.dev) origin from WORKER_URL, or null when it is unset, not an
+ * https URL, or the UI's host.
+ */
+export function workerOrigin(env: { WORKER_URL?: string; UI_HOST?: string; ACCESS_TEAM_DOMAIN?: string; ACCESS_AUD?: string }): string | null {
+  let origin: string
+  try {
+    const url = new URL((env.WORKER_URL ?? '').trim())
+    if (url.protocol !== 'https:') return null
+    origin = url.origin
+  } catch {
+    return null
+  }
+  const ui = normaliseUiHost(env.UI_HOST)
+  return ui && origin === `https://${ui}` ? null : origin
 }
 
 /** A Slack message ts, as a thread id: seconds, a dot, microseconds. */

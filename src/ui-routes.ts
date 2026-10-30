@@ -14,7 +14,7 @@ import { isRoutineId } from './routines.ts'
 import { isPublicChannel } from './search.ts'
 import { channelInfo, slackApi } from './slack.ts'
 import { threadStub } from './thread-stub.ts'
-import { checkUiChannel, checkUiRoutine, checkWrite, isThreadTs, isTranscriptKeyFor, pageFor, renderPage, uiHeaders, uiOrigin } from './ui.ts'
+import { checkUiChannel, checkUiRoutine, checkWrite, isThreadTs, isTranscriptKeyFor, pageFor, renderPage, uiHeaders, uiOrigin, workerOrigin } from './ui.ts'
 
 /**
  * The web UI: GET pages and their API under /ui, all behind Cloudflare Access (src/access.ts). The
@@ -39,7 +39,7 @@ export async function uiRoute(request: Request, env: Env): Promise<Response> {
     return isApi ? json({ ok: false, error }, 503) : new Response(`${error}\n`, { status: 503, headers: uiHeaders('text/plain; charset=utf-8') })
   }
   if (url.origin !== home) {
-    if (request.method === 'GET' && !isApi) return Response.redirect(new URL(url.pathname + url.search, home).toString(), 302)
+    if ((request.method === 'GET' || request.method === 'HEAD') && !isApi) return Response.redirect(new URL(url.pathname + url.search, home).toString(), 302)
     return json({ ok: false, error: `The web UI is at ${home}.` }, 404)
   }
   const who = await accessIdentity(request, env)
@@ -121,13 +121,16 @@ async function api(request: Request, env: Env, url: URL, email: string): Promise
     if (!checked.ok) return json({ ok: false, error: checked.error }, 400)
     const a = checked.value
     if (a.action === 'create') {
+      // Rule 6: the sandbox reports to the workers.dev address, never to this Access-guarded host.
+      const origin = workerOrigin(env)
+      if (!origin) return json({ ok: false, error: 'WORKER_URL is not set, so a routine made here could not report back. Run `npm run setup` again (README, "Web UI").' }, 503)
       const routine = await createRoutine(env, {
         channel: a.channel,
         prompt: a.prompt,
         cron: a.cron,
         timezone: a.timezone,
         model: a.model,
-        origin: url.origin,
+        origin,
         createdBy: null,
         createdThreadTs: null,
       })

@@ -96,6 +96,10 @@ To switch later, run `npm run setup` again and pick the other one.
 - **An Anthropic API key** ([console.anthropic.com](https://console.anthropic.com)). You pay per
   token. Use this if other people will use the bot. A long coding turn can cost several dollars.
 
+The Worker uses `ANTHROPIC_API_KEY` whenever it is stored, so to switch from a key to a plan token,
+fill in only `CLAUDE_CODE_OAUTH_TOKEN` and run setup again: it deletes the old key for you (and the
+other way round).
+
 ### Who can use it
 
 The bot answers **anyone** in the workspace who @mentions it (or, in a watched channel, anyone who
@@ -443,6 +447,7 @@ In `wrangler.jsonc` under `vars`. Run `npm run deploy` after you change one.
 | `UI_HOST` | (set by setup) | The web UI's own hostname, a custom domain on the Worker (also in `routes`). Empty: no web UI. |
 | `ACCESS_TEAM_DOMAIN` | (set by setup) | The web UI's Cloudflare Access team, `<team>.cloudflareaccess.com`. Empty: the UI refuses everyone. |
 | `ACCESS_AUD` | (set by setup) | The web UI's Access application AUD tag. Empty: the UI refuses everyone. |
+| `WORKER_URL` | (set by setup) | The Worker's workers.dev address. A routine made on the web UI reports back here, never to `UI_HOST`. Empty: the UI cannot make routines. |
 
 ## When something goes wrong
 
@@ -478,7 +483,9 @@ In `wrangler.jsonc` under `vars`. Run `npm run deploy` after you change one.
 - **The Home tab is empty or says "This is still being worked on":** reinstall the app from the
   manifest (it turns on `home_tab_enabled` and subscribes to `app_home_opened`).
 - **"Invalid API key" from Claude:** the Claude secret is wrong or expired. Run
-  `npx wrangler secret put CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) again.
+  `npx wrangler secret put CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) again. A stored
+  `ANTHROPIC_API_KEY` always wins, so if you meant to use a plan token, also run
+  `npx wrangler secret delete ANTHROPIC_API_KEY` (setup does this when only the token is filled in).
 
 ## Develop
 

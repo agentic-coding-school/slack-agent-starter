@@ -38,14 +38,32 @@ const wrangler = (args, opts) => run(WRANGLER[0], [...WRANGLER.slice(1), ...args
 
 function putSecret(name, value) {
   const r = spawnSync(WRANGLER[0], [...WRANGLER.slice(1), 'secret', 'put', name], { input: value, stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf8' })
-  if (r.status !== 0) throw new Error(`could not store ${name}: ${(r.stderr || r.stdout).trim().split('\n').pop()}`)
+  if (r.status !== 0) {
+    // Only wrangler's last line: it names the problem and never holds the value.
+    console.error(`NEXT: could not store ${name} (${(r.stderr || r.stdout || '').trim().split('\n').pop()}). Check \`npx wrangler whoami\` works, then run setup again.`)
+    process.exit(1)
+  }
   console.log(`  stored ${name}`)
+}
+
+/** Removes a secret. CI=1 answers wrangler's "Are you sure?" with yes. */
+function deleteSecret(name) {
+  const r = wrangler(['secret', 'delete', name], { capture: true, env: { ...process.env, CI: '1' } })
+  if (!r.ok) {
+    console.error(`NEXT: could not delete the old ${name} (${r.out.trim().split('\n').pop()}). Run \`npx wrangler secret delete ${name}\`, then run setup again.`)
+    process.exit(1)
+  }
+  console.log(`  deleted the old ${name}`)
 }
 
 /** The Worker's secret names, or null when they could not be read. Never an empty set on failure. */
 function existingSecrets() {
   const r = wrangler(['secret', 'list', '--format', 'json'], { capture: true })
   return parseSecretList(r.ok, r.stdout)
+}
+
+function getVar(name) {
+  return readFileSync('wrangler.jsonc', 'utf8').match(new RegExp(`"${name}":\\s*"([^"]*)"`))?.[1] ?? null
 }
 
 function setVar(name, value) {
@@ -195,8 +213,9 @@ if (!migrate.ok) {
 console.log(`  D1 database ${DATABASE} ready, migrations applied`)
 
 // The deploy also sets the Cron Trigger in wrangler.jsonc (routines, every minute); a redeploy keeps it.
-const deploy = wrangler(['deploy'], { capture: true })
-if (!deploy.ok) {
+function deployWorker() {
+  const deploy = wrangler(['deploy'], { capture: true })
+  if (deploy.ok) return deploy
   console.error(deploy.out)
   if (uiHost) {
     console.error(
@@ -204,10 +223,22 @@ if (!deploy.ok) {
         'with no DNS record of its own yet; the deploy makes one. Fix UI_HOST, or empty it and set "routes" in wrangler.jsonc back to [], then run again.',
     )
   }
+  console.error(
+    'NEXT: the deploy failed; read the error above. A new Cloudflare account may first need a workers.dev subdomain ' +
+      '(the human opens dash.cloudflare.com > Workers & Pages once and picks one). Fix it, then run setup again.',
+  )
   process.exit(1)
 }
+const deploy = deployWorker()
 const workerUrl = deploy.out.match(/https:\/\/[^\s]+\.workers\.dev/)?.[0]
 console.log(`  deployed: ${workerUrl ?? '(no workers.dev URL in the output; find it in the Cloudflare dashboard)'}`)
+// A routine made on the web UI reports back to WORKER_URL, never to UI_HOST (rule 6 in src/ui.ts).
+// The address is only known after the first deploy, so a new or changed one costs one more deploy.
+if (workerUrl && getVar('WORKER_URL') !== workerUrl) {
+  setVar('WORKER_URL', workerUrl)
+  deployWorker()
+  console.log(`  WORKER_URL set to ${workerUrl}`)
+}
 
 step('Secrets')
 // Generated once, and only when the secret list was read and does not name them. CALLBACK_SECRET:
@@ -218,8 +249,9 @@ step('Secrets')
 // one is kept, because GitHub already signs with it.
 let toGenerate
 let webhookPlan
+let have
 try {
-  const have = existingSecrets()
+  have = existingSecrets()
   toGenerate = generatedSecretsToCreate(have, ['CALLBACK_SECRET', 'CHANNEL_SECRETS_KEY'])
   webhookPlan = webhookSecretPlan(answers.GITHUB_WEBHOOK_SECRET, have)
 } catch {
@@ -228,6 +260,10 @@ try {
 }
 putSecret('SANDBOX_API_KEY', answers.SANDBOX_API_KEY)
 putSecret(claudeName, answers[claudeName])
+// The Worker prefers ANTHROPIC_API_KEY when both are stored (src/env.ts claudeAuth), so switching to
+// a plan token only works once the old key is gone. The reverse is deleted too, to keep one sign-in.
+const otherClaude = claudeName === 'ANTHROPIC_API_KEY' ? 'CLAUDE_CODE_OAUTH_TOKEN' : 'ANTHROPIC_API_KEY'
+if (have.has(otherClaude)) deleteSecret(otherClaude)
 for (const name of toGenerate) putSecret(name, randomBytes(32).toString('hex'))
 
 const next = []

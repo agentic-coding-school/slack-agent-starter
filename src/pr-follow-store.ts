@@ -157,6 +157,30 @@ export async function claimBatch(env: DbEnv, row: FollowRow, counter: WakeCounte
   return changed > 0
 }
 
+/**
+ * Undoes a claim whose wake never reached the thread (Slack or the thread refused): the day's
+ * counter goes back to what it was, only if no later claim changed it, and the lines join the
+ * batch again, so the next sweep tries once more instead of the events vanishing. Their clock
+ * restarts, so a Slack that keeps failing is retried every WAKE_DELAY_MS, not every minute.
+ */
+export async function releaseBatch(env: DbEnv, row: FollowRow, claimed: WakeCounter, lines: string[], now = Date.now()) {
+  await dbChanges(
+    env,
+    `UPDATE pr_follows SET wake_day = ?, wake_count = ?, stop_noted_day = ?, updated_at = ?
+     WHERE repo = ? AND number = ? AND status = 'active' AND wake_day IS ? AND wake_count = ? AND stop_noted_day IS ?`,
+    row.wake_day,
+    row.wake_count,
+    row.stop_noted_day,
+    now,
+    row.repo,
+    row.number,
+    claimed.wake_day,
+    claimed.wake_count,
+    claimed.stop_noted_day,
+  )
+  for (const line of lines) await addEvent(env, row, line, now)
+}
+
 /** The batch's lines. A row someone edited by hand into something else is an empty batch. */
 export function pendingLines(row: Pick<FollowRow, 'pending'>): string[] {
   try {

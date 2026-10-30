@@ -3,7 +3,8 @@ import type { CallbackClaims } from './callback-token.ts'
 /**
  * The rules for the R2 transcript backup. After every turn the sandbox uploads the thread's Claude
  * transcript (gzipped JSONL) to POST /sandbox/transcript with its one-turn token. Each turn writes
- * a NEW object, so nothing is overwritten, and there is no delete: backups are kept forever.
+ * a NEW object, and the door refuses a second upload for the same turn (src/index.ts), so nothing is
+ * overwritten, and there is no delete: backups are kept forever.
  *
  * The sandbox is untrusted (Claude runs there on text anyone can write), so the key is built ONLY
  * from the token's signed claims, never from the request. A sandbox cannot name another thread's

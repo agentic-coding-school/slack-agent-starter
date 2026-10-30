@@ -2,8 +2,9 @@ import { channelSettings } from './channel-store.ts'
 import type { Env } from './env.ts'
 import { pullsForCommit } from './github.ts'
 import { closedNote, planWake, readGithubEvent, stopNote, verifyGithubSignature, wakeNote, wakePrompt } from './pr-follow.ts'
-import { activeNumbers, addEvent, claimBatch, dueWakes, endFollow, pendingLines, type FollowRow } from './pr-follow-store.ts'
+import { activeNumbers, addEvent, claimBatch, dueWakes, endFollow, pendingLines, releaseBatch, type FollowRow } from './pr-follow-store.ts'
 import { postMessage } from './slack.ts'
+import type { AcceptResult } from './thread.ts'
 import { threadStub } from './thread-stub.ts'
 
 /**
@@ -80,19 +81,27 @@ export async function fireBatch(env: Env, row: FollowRow, now: number) {
     console.log(`${name}: ${lines.length} event(s) dropped, over today's cap`)
     return
   }
-  if (plan.action === 'stop-note') {
-    await postMessage(env, { channel: row.channel, thread_ts: row.thread_ts, text: stopNote(row, lines) })
-    console.log(`${name}: over today's cap, stop note posted`)
-    return
-  }
 
-  // The note's ts is the wake's message ts: unique, so the thread's dedupe never drops a wake.
-  const ts = await postMessage(env, { channel: row.channel, thread_ts: row.thread_ts, text: wakeNote(row, lines) })
-  const settings = await channelSettings(env, row.channel).catch(() => null)
-  const msg = { ts, user: row.followed_by ?? 'unknown', text: wakePrompt(row, lines, plan.wakeNumber) }
+  // Until the thread has the wake, a failure gives the batch back (releaseBatch): a Slack error must
+  // not lose a CI failure or a review, nor use up one of the day's wakes.
+  let result: AcceptResult
   const thread = threadStub(env, row.channel, row.thread_ts)
-  // Like a mention: it starts a turn, waits behind the running one, or joins it (src/thread.ts).
-  const result = await thread.accept(row.channel, row.thread_ts, row.origin, msg, true, settings ? settings.model : undefined)
+  try {
+    if (plan.action === 'stop-note') {
+      await postMessage(env, { channel: row.channel, thread_ts: row.thread_ts, text: stopNote(row, lines) })
+      console.log(`${name}: over today's cap, stop note posted`)
+      return
+    }
+    // The note's ts is the wake's message ts: unique, so the thread's dedupe never drops a wake.
+    const ts = await postMessage(env, { channel: row.channel, thread_ts: row.thread_ts, text: wakeNote(row, lines) })
+    const settings = await channelSettings(env, row.channel).catch(() => null)
+    const msg = { ts, user: row.followed_by ?? 'unknown', text: wakePrompt(row, lines, plan.wakeNumber) }
+    // Like a mention: it starts a turn, waits behind the running one, or joins it (src/thread.ts).
+    result = await thread.accept(row.channel, row.thread_ts, row.origin, msg, true, settings ? settings.model : undefined)
+  } catch (err) {
+    await releaseBatch(env, row, plan.counter, lines).catch((e) => console.error(`${name}: could not give the batch back:`, e))
+    throw err
+  }
   if (result.action === 'start') {
     try {
       await env.TURNS.send({ channel: row.channel, threadTs: row.thread_ts, origin: row.origin, turn: result.turn })

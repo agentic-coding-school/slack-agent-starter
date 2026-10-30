@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { homeView, visibleChannels, HOME_THREADS } from '../src/home.ts'
 import { followUrl } from '../src/status.ts'
 import { transcriptKey } from '../src/transcripts.ts'
-import { checkUiChannel, checkUiRoutine, checkWrite, isThreadTs, isTranscriptKeyFor, pageFor, renderPage, uiHeaders, normaliseUiHost, uiOrigin } from '../src/ui.ts'
+import { checkUiChannel, checkUiRoutine, checkWrite, isThreadTs, isTranscriptKeyFor, pageFor, renderPage, uiHeaders, normaliseUiHost, uiOrigin, workerOrigin } from '../src/ui.ts'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const { transcriptEntries } = await import(pathToFileURL(join(root, 'ui', 'transcript.js')).href)
@@ -171,4 +171,28 @@ test('rule 5: wrangler.jsonc keeps workers.dev for Slack and has the slots setup
   assert.match(text, /"workers_dev":\s*true/)
   assert.match(text, /"routes":\s*\[\]/, 'setup replaces this with the UI_HOST custom domain')
   assert.match(text, /"UI_HOST":\s*""/)
+})
+
+test('rule 6: a routine made on the UI reports to WORKER_URL, never to the Access-guarded UI host', () => {
+  const ui = { UI_HOST: 'agent.example.com', ACCESS_TEAM_DOMAIN: 'myteam', ACCESS_AUD: 'a'.repeat(64) }
+  const worker = 'https://slack-agent.me.workers.dev'
+  assert.equal(workerOrigin({ ...ui, WORKER_URL: worker }), worker)
+  assert.notEqual(workerOrigin({ ...ui, WORKER_URL: worker }), uiOrigin(ui))
+  assert.equal(workerOrigin({ ...ui, WORKER_URL: `${worker}/` }), worker, 'trimmed to the origin')
+  assert.equal(workerOrigin({ ...ui, WORKER_URL: 'https://agent.example.com' }), null, 'the UI host is never a job origin')
+  assert.equal(workerOrigin({ ...ui, WORKER_URL: 'http://slack-agent.me.workers.dev' }), null)
+  assert.equal(workerOrigin({ ...ui, WORKER_URL: '' }), null)
+  assert.equal(workerOrigin(ui), null)
+
+  // The create route takes its origin from workerOrigin, not from the request it was sent on.
+  const routes = readFileSync(join(root, 'src', 'ui-routes.ts'), 'utf8')
+  const create = routes.slice(routes.indexOf("a.action === 'create'"), routes.indexOf("a.action === 'update'"))
+  assert.match(create, /workerOrigin\(env\)/)
+  assert.doesNotMatch(create, /url\.origin/)
+  assert.match(readFileSync(join(root, 'wrangler.jsonc'), 'utf8'), /"WORKER_URL":\s*""/)
+})
+
+test('rule 5: a HEAD on workers.dev /ui is redirected like a GET (SETUP step 7 checks it with curl -I)', () => {
+  const routes = readFileSync(join(root, 'src', 'ui-routes.ts'), 'utf8')
+  assert.match(routes, /request\.method === 'GET' \|\| request\.method === 'HEAD'\) && !isApi\) return Response\.redirect/)
 })

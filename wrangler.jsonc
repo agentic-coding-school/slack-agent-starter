@@ -64,6 +64,9 @@
     // empty means the UI refuses everyone. `npm run setup` sets them (README, "Web UI").
     "UI_HOST": "",
     "ACCESS_TEAM_DOMAIN": "",
-    "ACCESS_AUD": ""
+    "ACCESS_AUD": "",
+    // The Worker's workers.dev address. A routine made on the web UI reports back here, never to
+    // UI_HOST (rule 6 in src/ui.ts). `npm run setup` writes it from the deploy output.
+    "WORKER_URL": ""
   }
 }

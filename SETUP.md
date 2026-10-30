@@ -125,6 +125,7 @@ Then run setup again with `--skip-template`. Check both halves yourself:
 curl -s <worker>/                    # must say "slack-agent is running": Slack still reaches the Worker
 curl -sI https://<UI_HOST>/ui/ | head -3   # must redirect to <team>.cloudflareaccess.com: the UI is behind Access
 curl -sI <worker>/ui/ | head -3      # must redirect to https://<UI_HOST>/ui/: workers.dev never serves the UI
+grep '"WORKER_URL"' wrangler.jsonc   # must be <worker>: a routine made on the UI reports back there, not to UI_HOST
 ```
 
 Then the human opens `https://<UI_HOST>/ui/` in a browser, signs in, and sees the Threads page.

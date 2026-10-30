@@ -234,8 +234,9 @@ async function runClaude() {
   ]
 
   return await new Promise((resolve) => {
-    // Claude and every command it runs get the env WITHOUT the reply token: a prompt-injected
-    // Claude must not be able to post its own "answer" and end the turn.
+    // Claude and every command it runs get the env WITHOUT the reply token, so Claude does not
+    // post its own "answer" by mistake. Not a wall: Claude has this user's uid and sudo, so it could
+    // read the token from this process (src/callback-token.ts says what still holds then).
     const { CALLBACK_TOKEN: _t, CALLBACK_URL: _u, TRANSCRIPT_URL: _x, PROGRESS_URL: _p, FILES_MANIFEST: _m, FILE_URL: _f, MEMORY_URL: _y, ...childEnv } = env
     child = spawn('claude', args, {
       cwd: join(homedir(), 'work'),

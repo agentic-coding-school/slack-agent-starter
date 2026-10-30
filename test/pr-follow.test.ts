@@ -391,6 +391,24 @@ test('a failed check waits, then wakes the thread that opened the PR with one tu
   assert.equal(world.sent.length, 1, 'the batch fired once')
 })
 
+test('a wake Slack refuses gives the batch back: no event is lost and no wake is used up', async () => {
+  const { env: db } = fakeD1()
+  await followPr(db, follow(), NOW)
+  const world = fakeWorld(db)
+  await addEvent(db, PR, 'Review from octocat: changes requested', NOW)
+  const ratelimited = (async () => Response.json({ ok: false, error: 'ratelimited' })) as typeof fetch
+  await withFetch(ratelimited, () => sweepPrFollows(world.env, NOW + WAKE_DELAY_MS))
+  assert.equal(world.sent.length, 0)
+  const row = (await getFollow(db, PR))!
+  assert.deepEqual(pendingLines(row), ['Review from octocat: changes requested'], 'the event waits again')
+  assert.equal(row.wake_count, 0, 'the failed wake is not counted')
+
+  await withFetch(world.fetchImpl as typeof fetch, () => sweepPrFollows(world.env, row.pending_since! + WAKE_DELAY_MS))
+  assert.equal(world.sent.length, 1, 'the next sweep wakes the thread')
+  assert.match(String(world.slack[0].body.text), /changes requested/)
+  assert.equal((await getFollow(db, PR))!.wake_count, 1)
+})
+
 test('after three wakes in a day the thread gets one stop note and no more turns', async () => {
   const { env: db } = fakeD1()
   await followPr(db, follow(), NOW)
