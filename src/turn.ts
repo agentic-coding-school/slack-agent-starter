@@ -72,9 +72,16 @@ export async function runTurnJob(env: Env, job: TurnJob, attempt: number, maxAtt
     // A database error is retried like any other; a missing key only costs the turn its secrets.
     const secrets = await channelSecretsForTurn(env, channel)
 
-    const history = turn.firstTurn ? await threadHistory(env, channel, threadTs, turn.messages[0].ts) : []
+    const history = turn.firstTurn ? await threadHistory(env, channel, threadTs, turn.messages[0].ts) : { messages: [], leftOut: 0 }
     const prompt =
-      buildPrompt({ messages: turn.messages, history, githubEnabled: Boolean(githubToken) }) + githubNote + (secrets.note ? `\n${secrets.note}` : '')
+      buildPrompt({
+        messages: turn.messages,
+        history: history.messages,
+        historyLeftOut: history.leftOut,
+        githubEnabled: Boolean(githubToken),
+      }) +
+      githubNote +
+      (secrets.note ? `\n${secrets.note}` : '')
 
     // The time limit counts from when the thread started the turn, not from this launch, so a
     // launch delayed by queue retries cannot outlive the thread's lost-turn alarm.

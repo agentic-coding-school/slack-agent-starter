@@ -25,10 +25,17 @@ export async function sessionIdFor(channel: string, threadTs: string): Promise<s
  * What Claude reads for one turn. On the first turn of a thread it also gets the messages that came
  * before the mention, so "@bot what do you think of the above?" works.
  */
-export function buildPrompt(opts: { messages: SlackMessage[]; history: SlackMessage[]; githubEnabled: boolean }): string {
+export function buildPrompt(opts: {
+  messages: SlackMessage[]
+  history: SlackMessage[]
+  historyLeftOut?: number
+  githubEnabled: boolean
+}): string {
   const parts: string[] = []
   if (opts.history.length) {
-    parts.push('Earlier messages in this Slack thread, oldest first:', ...opts.history.map(line), '')
+    const [first, ...rest] = opts.history.map(line)
+    const gap = opts.historyLeftOut ? [`[${opts.historyLeftOut} message(s) left out here]`] : []
+    parts.push('Earlier messages in this Slack thread, oldest first:', first, ...gap, ...rest, '')
   }
   parts.push(opts.messages.length > 1 ? 'New messages for you:' : 'New message for you:', ...opts.messages.map(line), '')
   parts.push(

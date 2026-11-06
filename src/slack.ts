@@ -112,17 +112,41 @@ export async function react(env: Env, channel: string, ts: string, add: string |
   await Promise.allSettled(calls)
 }
 
-/** The thread's messages before `beforeTs`, oldest first, for the first turn's prompt. */
+// Slack's largest page, and how many we walk before settling for what we have.
+const THREAD_PAGE_SIZE = 200
+const THREAD_MAX_PAGES = 25
+
+/**
+ * The thread before `beforeTs` for the first turn's prompt: its first message and the newest ones,
+ * oldest first, plus how many in between were left out. `conversations.replies` answers from the top
+ * of the thread, so it is paged to the end, or a long thread would lose its newest messages. Slack
+ * repeats the root on every page, so messages are kept by ts. A failure mid-way keeps what was read.
+ */
 export async function threadHistory(env: Env, channel: string, threadTs: string, beforeTs: string, limit = 30) {
-  const json = await slackApi(env, 'conversations.replies', { channel, ts: threadTs, limit: 200 }).catch((err) => {
-    console.warn('could not read thread history:', err.message)
-    return { messages: [] }
-  })
-  const messages = (json.messages as Array<{ ts: string; user?: string; bot_id?: string; text?: string }>) ?? []
-  return messages
-    .filter((m) => Number(m.ts) < Number(beforeTs) && m.text)
-    .slice(-limit)
-    .map((m) => ({ ts: m.ts, user: m.user ?? (m.bot_id ? 'a bot' : 'unknown'), text: m.text ?? '' }))
+  const seen = new Map<string, { ts: string; user?: string; bot_id?: string; text?: string }>()
+  try {
+    let cursor: string | undefined
+    for (let page = 0; page < THREAD_MAX_PAGES; page++) {
+      const json = await slackApi(env, 'conversations.replies', {
+        channel,
+        ts: threadTs,
+        limit: THREAD_PAGE_SIZE,
+        ...(cursor ? { cursor } : {}),
+      })
+      for (const m of (json.messages as Array<{ ts: string }>) ?? []) seen.set(m.ts, m)
+      cursor = (json.response_metadata as { next_cursor?: string } | undefined)?.next_cursor
+      if (!json.has_more || !cursor) break
+    }
+  } catch (err) {
+    console.warn('could not read thread history:', (err as Error).message)
+  }
+  const earlier = [...seen.values()].filter((m) => Number(m.ts) < Number(beforeTs) && m.text)
+  const [first, ...rest] = earlier
+  const kept = first ? [first, ...rest.slice(-(limit - 1))] : []
+  return {
+    messages: kept.map((m) => ({ ts: m.ts, user: m.user ?? (m.bot_id ? 'a bot' : 'unknown'), text: m.text ?? '' })),
+    leftOut: earlier.length - kept.length,
+  }
 }
 
 /** Posts one message and returns its ts. */
