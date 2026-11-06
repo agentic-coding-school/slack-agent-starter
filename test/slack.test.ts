@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
 import { test } from 'node:test'
 import { buildPrompt, sessionIdFor } from '../src/prompt.ts'
-import { splitMessage, verifySlackSignature } from '../src/slack.ts'
+import { splitMessage, threadHistory, verifySlackSignature } from '../src/slack.ts'
 
 const SECRET = 'slack-signing-secret'
 const sign = (ts: string, body: string) => 'v0=' + createHmac('sha256', SECRET).update(`v0:${ts}:${body}`).digest('hex')
@@ -43,4 +43,41 @@ test('the first turn includes the earlier thread messages', () => {
   })
   assert.match(prompt, /<@U2>: we should ship friday[\s\S]*<@U1>: what do you think\?/)
   assert.match(prompt, /GitHub access is off/)
+})
+
+// Slack answers oldest first, 200 to a page, with the root at the top of every page.
+function fakeThread(length: number) {
+  const thread = Array.from({ length }, (_, i) => ({ ts: `${100 + i}.0`, user: 'U1', text: `message ${i + 1}` }))
+  return async (_url: unknown, init: { body: URLSearchParams }) => {
+    const from = Number(init.body.get('cursor') ?? 1)
+    const next = from + Number(init.body.get('limit')) - 1
+    const more = next < length
+    const json = { ok: true, messages: [thread[0], ...thread.slice(from, next)], has_more: more, response_metadata: { next_cursor: more ? String(next) : '' } }
+    return new Response(JSON.stringify(json), { headers: { 'Content-Type': 'application/json' } })
+  }
+}
+
+test('threadHistory reads past the first page and keeps the first message and the newest', async (t) => {
+  t.mock.method(globalThis, 'fetch', fakeThread(500))
+  const { messages, leftOut } = await threadHistory({ SLACK_BOT_TOKEN: 'x' } as never, 'C1', '100.0', '599.0')
+  assert.equal(messages.length, 30)
+  assert.equal(messages[0].text, 'message 1')
+  assert.equal(messages.at(-1)?.text, 'message 499')
+  assert.equal(leftOut, 469)
+})
+
+test('threadHistory gives a short thread whole', async (t) => {
+  t.mock.method(globalThis, 'fetch', fakeThread(10))
+  const { messages, leftOut } = await threadHistory({ SLACK_BOT_TOKEN: 'x' } as never, 'C1', '100.0', '109.0')
+  assert.equal(messages.length, 9)
+  assert.equal(leftOut, 0)
+})
+
+test('the prompt says where history was left out', () => {
+  const history = [
+    { ts: '1.0', user: 'U1', text: 'first' },
+    { ts: '9.0', user: 'U1', text: 'newest' },
+  ]
+  const prompt = buildPrompt({ messages: [], history, historyLeftOut: 7, githubEnabled: false })
+  assert.match(prompt, /first\n\[7 message\(s\) left out here\]\n<@U1>: newest/)
 })
